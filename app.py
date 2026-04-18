@@ -428,13 +428,36 @@ a { color:var(--blue); }
 .apply-btn:hover .apply-arrow { color:var(--blue); transform:translateX(2px); }
 .apply-btn.is-active .apply-arrow { color:var(--blue); }
 
-.rate-input {
-  width:100px; padding:0.5rem 0.6rem; text-align:right;
+.rate-ctl { display:flex; align-items:center; gap:0.3rem; flex-shrink:0; }
+.rate-slider {
+  -webkit-appearance:none; appearance:none;
+  flex:1; height:3px; min-width:55px; max-width:80px;
+  background:var(--border2); border-radius:2px;
+  cursor:pointer; outline:none;
+}
+.rate-slider::-webkit-slider-thumb {
+  -webkit-appearance:none; width:14px; height:14px;
+  border-radius:50%; background:var(--blue); cursor:pointer;
+}
+.rate-slider::-moz-range-thumb {
+  width:14px; height:14px; border:none;
+  border-radius:50%; background:var(--blue); cursor:pointer;
+}
+.rate-num {
+  width:52px; padding:0.45rem 0.4rem; text-align:right;
   background:var(--surface); border:1px solid var(--border2);
   border-radius:6px; color:var(--text);
   font-size:0.82rem; font-family:monospace;
 }
-.rate-input:focus { outline:none; border-color:var(--blue); }
+.rate-num:focus { outline:none; border-color:var(--blue); }
+.rate-unit {
+  padding:0.45rem 0.4rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--text);
+  font-size:0.78rem; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+}
+.rate-unit:focus { outline:none; border-color:var(--blue); }
 
 .icon-btn {
   padding:0.5rem 0.65rem;
@@ -581,11 +604,18 @@ footer {
   <form method="post" action="/add" class="add-row">
     <input class="name-input" type="text" name="label"
            placeholder="Preset name" required maxlength="40">
-    <input class="rate-input" type="text" name="rate"
-           placeholder="e.g. 500mbit" required style="width:110px">
+    <div class="rate-ctl">
+      <input type="range" class="rate-slider">
+      <input type="number" class="rate-num">
+      <select class="rate-unit">
+        <option value="kbit">Kbps</option>
+        <option value="mbit" selected>Mbps</option>
+        <option value="gbit">Gbps</option>
+      </select>
+      <input type="hidden" name="rate" class="rate-val" value="500mbit" required>
+    </div>
     <button type="submit" class="add-btn">+ Add</button>
   </form>
-  <p class="hint">Units: kbit &nbsp;mbit &nbsp;gbit &nbsp;·&nbsp; e.g. 100mbit &nbsp;500mbit &nbsp;1gbit &nbsp;2.5gbit</p>
 </div>
 
 <!-- Speed test -->
@@ -691,6 +721,56 @@ async function startSpeedTest() {
   stPoll = setInterval(pollSpeedtest, 500);
 }
 
+// ── Rate controls (slider + number + unit) ────────────────────────────────────
+const UNIT_CFG = {
+  kbit: { min: 100,  max: 10000, step: 100 },
+  mbit: { min: 10,   max: 1000,  step: 10  },
+  gbit: { min: 0.1,  max: 10,    step: 0.1 },
+};
+
+function parseRate(s) {
+  const m = (s || '').match(/^(\d+(?:\.\d+)?)\s*(kbit|mbit|gbit)/i);
+  if (!m) return { val: 500, unit: 'mbit' };
+  return { val: parseFloat(m[1]), unit: m[2].toLowerCase() };
+}
+
+function initRateControl(ctl) {
+  const slider = ctl.querySelector('.rate-slider');
+  const num    = ctl.querySelector('.rate-num');
+  const unit   = ctl.querySelector('.rate-unit');
+  const hidden = ctl.querySelector('.rate-val');
+
+  function applyUnit(u) {
+    const c = UNIT_CFG[u];
+    slider.min = c.min; slider.max = c.max; slider.step = c.step;
+    num.min = c.min;    num.max = c.max;    num.step = c.step;
+  }
+
+  function sync(val, u) {
+    const c = UNIT_CFG[u];
+    const v = Math.max(c.min, Math.min(c.max, Math.round(val / c.step) * c.step));
+    slider.value = v;
+    num.value    = v;
+    hidden.value = v + u;
+    // Update the preset's sub-label so the button always shows the live rate
+    const sub = ctl.closest('form').querySelector('.sub');
+    if (sub) sub.textContent = v + u;
+  }
+
+  const { val, unit: u } = parseRate(hidden.value);
+  unit.value = u;
+  applyUnit(u);
+  sync(val, u);
+
+  slider.addEventListener('input',  () => sync(parseFloat(slider.value), unit.value));
+  num.addEventListener('input',     () => sync(parseFloat(num.value) || 0, unit.value));
+  unit.addEventListener('change',   () => { applyUnit(unit.value); sync(parseFloat(num.value) || 0, unit.value); });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.rate-ctl').forEach(initRateControl);
+});
+
 async function pollSpeedtest() {
   try {
     const r = await fetch('/api/speedtest/status');
@@ -730,7 +810,16 @@ BUILTIN_ROW = """\
     <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
     <span class="apply-arrow">›</span>
   </button>
-  <input class="rate-input" type="text" name="rate" value="{rate}" title="tc rate">
+  <div class="rate-ctl">
+    <input type="range" class="rate-slider">
+    <input type="number" class="rate-num">
+    <select class="rate-unit">
+      <option value="kbit">Kbps</option>
+      <option value="mbit">Mbps</option>
+      <option value="gbit">Gbps</option>
+    </select>
+    <input type="hidden" name="rate" class="rate-val" value="{rate}">
+  </div>
   <button type="submit" formaction="/save" class="icon-btn">Save</button>
 </form>"""
 
@@ -741,7 +830,16 @@ CUSTOM_ROW = """\
     <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
     <span class="apply-arrow">›</span>
   </button>
-  <input class="rate-input" type="text" name="rate" value="{rate}" title="tc rate">
+  <div class="rate-ctl">
+    <input type="range" class="rate-slider">
+    <input type="number" class="rate-num">
+    <select class="rate-unit">
+      <option value="kbit">Kbps</option>
+      <option value="mbit">Mbps</option>
+      <option value="gbit">Gbps</option>
+    </select>
+    <input type="hidden" name="rate" class="rate-val" value="{rate}">
+  </div>
   <button type="submit" formaction="/save" class="icon-btn">Save</button>
   <button type="submit" formaction="/delete"
           onclick="return confirm('Delete &quot;{label}&quot;?')"
