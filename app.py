@@ -290,10 +290,10 @@ a { color:var(--blue); }
 /* ── Header ── */
 .header {
   width:100%; max-width:640px;
-  display:flex; align-items:center; justify-content:space-between;
+  display:flex; align-items:flex-start; justify-content:space-between;
   margin-bottom:1.5rem;
 }
-.title-img { height:72px; width:auto; display:block; }
+.title-img { height:216px; width:auto; display:block; }
 .header h1 span { color:var(--blue); }
 .live-dot {
   display:inline-flex; align-items:center; gap:6px;
