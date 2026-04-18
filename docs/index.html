@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cruise Control — GB10 Bandwidth Throttle</title>
+<meta name="description" content="Inbound bandwidth throttle for GB10-class machines. Web GUI, live speed display, named presets, one-command install.">
+<style>
+:root {
+  --bg:      #08090d;
+  --surface: #0f1117;
+  --card:    #141720;
+  --border:  #1e2130;
+  --border2: #252a3a;
+  --text:    #d4d8e8;
+  --muted:   #5a607a;
+  --dim:     #3a4060;
+  --blue:    #4d9fff;
+  --blue-d:  #0d1e38;
+  --green:   #3dd68c;
+  --green-d: #0f2e20;
+  --amber:   #f0b429;
+  --red:     #f25c54;
+  --cyan:    #38c8f8;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+html { scroll-behavior:smooth; }
+body {
+  background:var(--bg); color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px; line-height:1.6;
+}
+a { color:var(--blue); text-decoration:none; }
+a:hover { text-decoration:underline; }
+
+/* ── Nav ── */
+nav {
+  position:sticky; top:0; z-index:100;
+  background:rgba(8,9,13,0.88); backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 2rem; height:56px;
+}
+.nav-back { font-size:0.82rem; color:var(--muted); display:flex; align-items:center; gap:0.4rem; }
+.nav-back:hover { color:var(--text); text-decoration:none; }
+.nav-brand {
+  font-family:"Arial Black","Franklin Gothic Heavy","Impact",sans-serif;
+  font-size:1rem; font-weight:900; font-style:italic;
+  letter-spacing:0.08em; text-transform:uppercase;
+  background:linear-gradient(180deg,#e8f8ff 0%,#a8e8ff 25%,#38c8f8 60%,#0890c8 100%);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
+  filter:drop-shadow(0 0 6px rgba(56,200,248,0.4));
+}
+.nav-links { display:flex; gap:1.25rem; }
+.nav-links a { font-size:0.82rem; color:var(--muted); }
+.nav-links a:hover { color:var(--text); text-decoration:none; }
+
+/* ── Hero ── */
+.hero {
+  max-width:760px; margin:0 auto;
+  padding:5.5rem 2rem 4rem;
+  text-align:center;
+}
+.hero-eyebrow {
+  display:inline-flex; align-items:center; gap:0.5rem;
+  margin-bottom:1.25rem;
+  font-size:0.72rem; font-weight:700; letter-spacing:0.14em;
+  text-transform:uppercase; color:var(--blue);
+  background:var(--blue-d); border:1px solid rgba(77,159,255,0.2);
+  padding:0.3rem 0.85rem; border-radius:20px;
+}
+.hero h1 {
+  font-family:"Arial Black","Franklin Gothic Heavy","Impact",sans-serif;
+  font-size:clamp(2.2rem,6vw,3.75rem); font-weight:900; font-style:italic;
+  letter-spacing:0.04em; text-transform:uppercase; line-height:1.05;
+  background:linear-gradient(180deg,#e8f8ff 0%,#a8e8ff 25%,#38c8f8 60%,#0890c8 100%);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
+  filter:drop-shadow(0 0 24px rgba(56,200,248,0.35));
+  margin-bottom:1.25rem;
+}
+.hero-sub {
+  font-size:1.05rem; color:var(--muted); max-width:520px; margin:0 auto 2.25rem;
+  line-height:1.7;
+}
+.hero-actions { display:flex; gap:0.75rem; justify-content:center; flex-wrap:wrap; }
+.btn-primary {
+  display:inline-block; padding:0.65rem 1.4rem;
+  background:var(--blue); color:#000;
+  font-size:0.88rem; font-weight:700;
+  border-radius:7px; border:none; cursor:pointer;
+  transition:opacity .15s;
+}
+.btn-primary:hover { opacity:.85; text-decoration:none; color:#000; }
+.btn-ghost {
+  display:inline-block; padding:0.65rem 1.4rem;
+  background:none; color:var(--text);
+  font-size:0.88rem; font-weight:600;
+  border-radius:7px; border:1px solid var(--border2);
+  transition:border-color .15s;
+}
+.btn-ghost:hover { border-color:var(--blue); color:var(--blue); text-decoration:none; }
+
+/* ── Install hero ── */
+.install-hero {
+  max-width:760px; margin:0 auto; padding:0 2rem 4rem;
+}
+.install-block {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; overflow:hidden;
+}
+.install-tabs {
+  display:flex; border-bottom:1px solid var(--border);
+  background:var(--surface);
+}
+.install-tab {
+  padding:0.55rem 1rem; font-size:0.78rem; font-weight:600;
+  color:var(--muted); cursor:pointer; border:none; background:none;
+  border-bottom:2px solid transparent; margin-bottom:-1px;
+  transition:color .12s;
+}
+.install-tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+.install-panel { display:none; padding:1.1rem 1.25rem; }
+.install-panel.active { display:block; }
+.install-cmd {
+  font-family:monospace; font-size:0.85rem; color:var(--green);
+  white-space:pre; overflow-x:auto;
+}
+.install-meta {
+  display:flex; align-items:center; justify-content:space-between;
+  margin-top:0.75rem; flex-wrap:wrap; gap:0.5rem;
+}
+.install-note { font-size:0.72rem; color:var(--dim); }
+.copy-btn {
+  padding:0.35rem 0.7rem;
+  background:none; border:1px solid var(--border2);
+  border-radius:5px; color:var(--muted);
+  font-size:0.72rem; cursor:pointer; white-space:nowrap;
+  transition:border-color .12s, color .12s;
+}
+.copy-btn:hover { border-color:var(--blue); color:var(--blue); }
+.copy-btn.copied { border-color:var(--green); color:var(--green); }
+
+/* ── Section ── */
+section { max-width:900px; margin:0 auto; padding:3.5rem 2rem; }
+.section-label {
+  font-size:0.7rem; font-weight:700; letter-spacing:0.16em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:0.4rem;
+}
+.section-title {
+  font-size:1.5rem; font-weight:800; color:#fff;
+  letter-spacing:-0.02em; margin-bottom:0.65rem;
+}
+.section-sub {
+  font-size:0.9rem; color:var(--muted); line-height:1.65;
+  margin-bottom:2rem; max-width:560px;
+}
+
+/* ── Feature grid ── */
+.feature-grid {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+  gap:0.75rem;
+}
+.feature-card {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:1.1rem 1.2rem;
+}
+.feature-icon { font-size:1.25rem; margin-bottom:0.6rem; }
+.feature-name { font-size:0.9rem; font-weight:700; color:#fff; margin-bottom:0.3rem; }
+.feature-desc { font-size:0.8rem; color:var(--muted); line-height:1.5; }
+
+/* ── How it works ── */
+.how-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:1.5rem;
+}
+@media(max-width:600px) { .how-grid { grid-template-columns:1fr; } }
+.how-block {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:1.25rem 1.35rem;
+}
+.how-title { font-size:0.82rem; font-weight:700; color:#fff; margin-bottom:0.6rem; display:flex; align-items:center; gap:0.5rem; }
+.how-title .dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.dot-green { background:var(--green); }
+.dot-red   { background:var(--red); }
+.how-steps { list-style:none; display:flex; flex-direction:column; gap:0.4rem; }
+.how-steps li { font-size:0.8rem; color:var(--muted); display:flex; gap:0.6rem; }
+.how-steps li::before { content:attr(data-n); color:var(--dim); font-family:monospace; flex-shrink:0; }
+
+/* ── Flow diagram ── */
+.flow {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:1.5rem; overflow-x:auto;
+  font-family:monospace; font-size:0.78rem; color:var(--muted);
+  line-height:2; white-space:pre;
+}
+.flow .hi { color:var(--blue); }
+.flow .hi2 { color:var(--green); }
+.flow .hi3 { color:var(--cyan); }
+
+/* ── Specs table ── */
+.spec-table { width:100%; border-collapse:collapse; font-size:0.83rem; }
+.spec-table th {
+  text-align:left; padding:0.6rem 0.75rem;
+  font-size:0.68rem; font-weight:700; letter-spacing:0.1em;
+  text-transform:uppercase; color:var(--muted);
+  border-bottom:1px solid var(--border);
+}
+.spec-table td { padding:0.65rem 0.75rem; border-bottom:1px solid var(--border); }
+.spec-table tr:last-child td { border-bottom:none; }
+.spec-table td:first-child { font-family:monospace; color:var(--text); white-space:nowrap; }
+.spec-table td:last-child  { color:var(--muted); }
+.badge-ok  { color:var(--green); font-size:0.72rem; font-weight:700; }
+
+/* ── Divider ── */
+.divider { border:none; border-top:1px solid var(--border); }
+
+/* ── Footer ── */
+footer {
+  border-top:1px solid var(--border);
+  padding:2rem; text-align:center;
+  font-size:0.72rem; color:var(--dim); line-height:2;
+}
+footer a { color:var(--dim); }
+footer a:hover { color:var(--muted); }
+
+@media(max-width:600px) {
+  nav { padding:0 1rem; }
+  .hero, .install-hero { padding-left:1.25rem; padding-right:1.25rem; }
+  section { padding:2.5rem 1.25rem; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-back" href="https://mcglothi.github.io">← All projects</a>
+  <span class="nav-brand">Cruise Control</span>
+  <div class="nav-links">
+    <a href="#install">Install</a>
+    <a href="#features">Features</a>
+    <a href="#how-it-works">How it works</a>
+    <a href="https://github.com/mcglothi/cruise-control" target="_blank">GitHub</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<div class="hero">
+  <span class="hero-eyebrow">🎛 Systemd service · arm64 / amd64 · Port 8090</span>
+  <h1>Cruise Control</h1>
+  <p class="hero-sub">
+    Inbound bandwidth throttle for GB10-class machines.
+    Browser-based presets, instant apply, live RX/TX display —
+    no SSH required after install.
+  </p>
+  <div class="hero-actions">
+    <a href="#install" class="btn-primary">Install</a>
+    <a href="https://github.com/mcglothi/cruise-control" class="btn-ghost" target="_blank">GitHub →</a>
+    <a href="https://github.com/mcglothi/cruise-control/releases" class="btn-ghost" target="_blank">Releases →</a>
+  </div>
+</div>
+
+<!-- Install -->
+<div class="install-hero" id="install">
+  <div class="install-block">
+    <div class="install-tabs">
+      <button class="install-tab active" onclick="showTab('online',this)">Online installer</button>
+      <button class="install-tab" onclick="showTab('offline',this)">Offline .deb</button>
+      <button class="install-tab" onclick="showTab('manual',this)">Manual</button>
+    </div>
+
+    <div class="install-panel active" id="tab-online">
+      <div class="install-cmd" id="cmd-online">curl -fsSL https://raw.githubusercontent.com/mcglothi/cruise-control/main/install.sh | sudo bash</div>
+      <div class="install-meta">
+        <span class="install-note">Detects arch · installs deps via apt · auto-detects NIC · starts service</span>
+        <button class="copy-btn" onclick="copyCmd('cmd-online',this)">Copy</button>
+      </div>
+    </div>
+
+    <div class="install-panel" id="tab-offline">
+      <div class="install-cmd" id="cmd-offline"># Download from Releases, then:
+sudo dpkg -i cruise-control_&lt;version&gt;_arm64.deb</div>
+      <div class="install-meta">
+        <span class="install-note">config.json is a dpkg conffile — preserved across upgrades</span>
+        <a href="https://github.com/mcglothi/cruise-control/releases" target="_blank" class="copy-btn">Releases →</a>
+      </div>
+    </div>
+
+    <div class="install-panel" id="tab-manual">
+      <div class="install-cmd" id="cmd-manual">sudo mkdir -p /opt/cruise-control
+sudo cp app.py config.example.json /opt/cruise-control/
+sudo cp cruise-control.service /etc/systemd/system/
+# edit THROTTLE_IFACE in the service file, then:
+sudo systemctl daemon-reload && sudo systemctl enable --now cruise-control</div>
+      <div class="install-meta">
+        <span class="install-note">See README for interface detection and env var reference</span>
+        <button class="copy-btn" onclick="copyCmd('cmd-manual',this)">Copy</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- Features -->
+<section id="features">
+  <div class="section-label">Features</div>
+  <div class="section-title">What you get</div>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <div class="feature-icon">⬇️</div>
+      <div class="feature-name">Ingress limiting</div>
+      <div class="feature-desc">
+        Shapes inbound traffic via Linux <code>tc</code> + IFB —
+        the only way to actually cap model download speeds.
+        Egress-only tools don't work here.
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⚡</div>
+      <div class="feature-name">Instant apply</div>
+      <div class="feature-desc">
+        Preset changes take effect in under a second.
+        No service restart, no network interruption, no dropped connections.
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📊</div>
+      <div class="feature-name">Live stats</div>
+      <div class="feature-desc">
+        RX/TX speeds direct from kernel interface counters,
+        updated every second. Limit and link speed shown inline.
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🎛</div>
+      <div class="feature-name">Named presets</div>
+      <div class="feature-desc">
+        Built-in presets for Business Hours and Heavy Throttle.
+        Add named custom presets for any event — rates persist across reboots.
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🧪</div>
+      <div class="feature-name">Built-in speed test</div>
+      <div class="feature-desc">
+        Download a test file from Tele2, Hetzner, or your own internal server.
+        Confirms a preset is actually working, not just applied.
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">♻️</div>
+      <div class="feature-name">Clean teardown</div>
+      <div class="feature-desc">
+        <code>ExecStop</code> removes all <code>tc</code> rules on service stop.
+        A crash or reboot never leaves a stale rate limit in place.
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- How it works -->
+<section id="how-it-works">
+  <div class="section-label">Internals</div>
+  <div class="section-title">How it works</div>
+  <p class="section-sub">
+    Linux <code>tc</code> can only queue egress natively. Model downloads are ingress.
+    Cruise Control bridges this with IFB — a kernel virtual interface that
+    redirects inbound packets to an egress queue where HTB can shape them.
+  </p>
+
+  <div class="flow">  <span class="hi">incoming traffic</span>
+         ↓
+    <span class="hi2">enP7s7 ingress</span>  →  <span class="hi3">tc mirred redirect</span>  →  <span class="hi2">ifb0 egress</span>  →  <span class="hi">HTB rate limit</span>
+                                                                          ↓
+                                                               packet delivered</div>
+
+  <div class="how-grid" style="margin-top:1.25rem">
+    <div class="how-block">
+      <div class="how-title"><span class="dot dot-green"></span>When you apply a preset</div>
+      <ol class="how-steps">
+        <li data-n="1.">modprobe ifb loads the IFB kernel module</li>
+        <li data-n="2.">Virtual ifb0 interface is created and brought up</li>
+        <li data-n="3.">tc ingress qdisc added to real interface</li>
+        <li data-n="4.">tc filter redirects all inbound packets to ifb0</li>
+        <li data-n="5.">HTB qdisc on ifb0 enforces the rate limit</li>
+      </ol>
+    </div>
+    <div class="how-block">
+      <div class="how-title"><span class="dot dot-red"></span>When you clear</div>
+      <ol class="how-steps">
+        <li data-n="1.">ingress qdisc and filter removed from real interface</li>
+        <li data-n="2.">HTB qdisc removed from ifb0</li>
+        <li data-n="3.">ifb0 taken down and deleted</li>
+        <li data-n="4.">Traffic flows at full line rate immediately</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- Requirements -->
+<section>
+  <div class="section-label">Requirements</div>
+  <div class="section-title">What you need</div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    <table class="spec-table">
+      <thead>
+        <tr><th>Requirement</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Linux arm64 or x86_64</td><td>Tested on Ubuntu 22.04 / 24.04 on NVIDIA GB10</td></tr>
+        <tr><td>Python 3.8+</td><td>Standard on all target systems</td></tr>
+        <tr><td>python3-flask</td><td><span class="badge-ok">Auto-installed</span> by online installer</td></tr>
+        <tr><td>iproute2</td><td>Ships with Ubuntu — provides <code>tc</code> and <code>ip</code></td></tr>
+        <tr><td>kmod</td><td>For <code>modprobe ifb</code> — ships with Ubuntu</td></tr>
+        <tr><td>Root / sudo</td><td>Required for <code>tc</code> and <code>ip link</code> commands</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- Service management -->
+<section>
+  <div class="section-label">Operations</div>
+  <div class="section-title">Service management</div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem 1.4rem">
+    <div style="font-family:monospace;font-size:0.82rem;line-height:2.1;color:var(--muted)">
+      <div><span style="color:var(--dim)"># Status</span></div>
+      <div style="color:var(--text)">sudo systemctl status cruise-control</div>
+      <div style="margin-top:0.4rem"><span style="color:var(--dim)"># Live logs</span></div>
+      <div style="color:var(--text)">sudo journalctl -u cruise-control -f</div>
+      <div style="margin-top:0.4rem"><span style="color:var(--dim)"># Restart after editing service file</span></div>
+      <div style="color:var(--text)">sudo systemctl daemon-reload && sudo systemctl restart cruise-control</div>
+      <div style="margin-top:0.4rem"><span style="color:var(--dim)"># Uninstall</span></div>
+      <div style="color:var(--text)">sudo dpkg -r cruise-control</div>
+    </div>
+  </div>
+  <div style="margin-top:1rem;font-size:0.78rem;color:var(--dim)">
+    Config lives at <code style="color:var(--muted)">/opt/cruise-control/config.json</code> and
+    is preserved across upgrades. Set <code style="color:var(--muted)">THROTTLE_IFACE</code> in
+    <code style="color:var(--muted)">/etc/systemd/system/cruise-control.service</code> for non-default interfaces.
+  </div>
+</section>
+
+<footer>
+  <div>
+    Part of the <a href="https://mcglothi.github.io">AI Ops Toolkit</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mcglothi/cruise-control" target="_blank">github.com/mcglothi/cruise-control</a>
+    &nbsp;·&nbsp;
+    MIT License
+  </div>
+</footer>
+
+<script>
+function showTab(id, btn) {
+  document.querySelectorAll('.install-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.install-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  btn.classList.add('active');
+}
+function copyCmd(id, btn) {
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+</script>
+</body>
+</html>
