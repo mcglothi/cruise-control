@@ -22,6 +22,16 @@ You set a rate, hit a button, and the machine stays under that ceiling until you
 
 ---
 
+## Screenshots
+
+![Cruise Control UI](docs/screenshots/ui-full.png)
+
+| Active throttle | Speed test + custom presets |
+|---|---|
+| ![Active throttle](docs/screenshots/ui-active.png) | ![Speed test panel](docs/screenshots/ui-speedtest.png) |
+
+---
+
 ## Requirements
 
 | Requirement | Notes |

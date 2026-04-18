@@ -100,6 +100,20 @@ nav {
 }
 .btn-ghost:hover { border-color:var(--blue); color:var(--blue); text-decoration:none; }
 
+/* ── Screenshots ── */
+.screenshots {
+  max-width:760px; margin:0 auto; padding:0 2rem 3rem;
+}
+.screenshot-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;
+}
+.screenshot-grid img {
+  width:100%; border-radius:10px;
+  border:1px solid var(--border); display:block;
+}
+.screenshot-grid img.full { grid-column:1/-1; }
+@media(max-width:540px) { .screenshot-grid { grid-template-columns:1fr; } }
+
 /* ── Install hero ── */
 .install-hero {
   max-width:760px; margin:0 auto; padding:0 2rem 4rem;
@@ -255,6 +269,15 @@ footer a:hover { color:var(--muted); }
     <a href="#install" class="btn-primary">Install</a>
     <a href="https://github.com/mcglothi/cruise-control" class="btn-ghost" target="_blank">GitHub →</a>
     <a href="https://github.com/mcglothi/cruise-control/releases" class="btn-ghost" target="_blank">Releases →</a>
+  </div>
+</div>
+
+<!-- Screenshots -->
+<div class="screenshots">
+  <div class="screenshot-grid">
+    <img class="full" src="screenshots/ui-full.png" alt="Cruise Control — full UI showing live stats, presets, and speed test">
+    <img src="screenshots/ui-active.png" alt="Active throttle — Business Hours preset applied at 1 Gbps">
+    <img src="screenshots/ui-speedtest.png" alt="Speed test panel and custom preset form">
   </div>
 </div>
 
