@@ -395,7 +395,7 @@ a { color:var(--blue); }
 
 /* ── Mode rows ── */
 .mode-row {
-  display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;
+  display:flex; flex-direction:column; gap:0.3rem; margin-bottom:0.75rem;
 }
 .apply-btn {
   flex:1; padding:0.7rem 1rem;
@@ -428,33 +428,33 @@ a { color:var(--blue); }
 .apply-btn:hover .apply-arrow { color:var(--blue); transform:translateX(2px); }
 .apply-btn.is-active .apply-arrow { color:var(--blue); }
 
-.rate-ctl { display:flex; align-items:center; gap:0.3rem; flex-shrink:0; }
-.rate-slider {
-  -webkit-appearance:none; appearance:none;
-  flex:1; height:3px; min-width:55px; max-width:80px;
-  background:var(--border2); border-radius:2px;
-  cursor:pointer; outline:none;
-}
-.rate-slider::-webkit-slider-thumb {
-  -webkit-appearance:none; width:14px; height:14px;
-  border-radius:50%; background:var(--blue); cursor:pointer;
-}
-.rate-slider::-moz-range-thumb {
-  width:14px; height:14px; border:none;
-  border-radius:50%; background:var(--blue); cursor:pointer;
-}
-.rate-num {
-  width:52px; padding:0.45rem 0.4rem; text-align:right;
+/* ── Rate chip control ── */
+.rate-row { display:flex; align-items:center; gap:0.5rem; }
+.rate-ctl { display:flex; align-items:center; gap:0.25rem; flex:1; flex-wrap:wrap; }
+.rate-chip {
+  padding:0.28rem 0.52rem;
   background:var(--surface); border:1px solid var(--border2);
-  border-radius:6px; color:var(--text);
-  font-size:0.82rem; font-family:monospace;
+  border-radius:5px; color:var(--muted);
+  font-size:0.74rem; font-weight:600; font-family:monospace;
+  cursor:pointer; white-space:nowrap; line-height:1;
+  transition:border-color .12s, color .12s, background .12s;
+}
+.rate-chip:hover    { border-color:var(--blue); color:var(--blue); }
+.rate-chip.is-active{ border-color:var(--blue); color:var(--blue); background:var(--blue-d); }
+.rate-custom-row { display:none; align-items:center; gap:0.2rem; }
+.rate-custom-row.open { display:flex; }
+.rate-num {
+  width:50px; padding:0.28rem 0.3rem; text-align:right;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:5px; color:var(--text);
+  font-size:0.76rem; font-family:monospace;
 }
 .rate-num:focus { outline:none; border-color:var(--blue); }
 .rate-unit {
-  padding:0.45rem 0.4rem;
+  padding:0.28rem 0.3rem;
   background:var(--surface); border:1px solid var(--border2);
-  border-radius:6px; color:var(--text);
-  font-size:0.78rem; cursor:pointer;
+  border-radius:5px; color:var(--text);
+  font-size:0.74rem; cursor:pointer;
   appearance:none; -webkit-appearance:none;
 }
 .rate-unit:focus { outline:none; border-color:var(--blue); }
@@ -601,20 +601,30 @@ footer {
 
   <hr class="divider" style="margin:1rem 0 0.75rem">
   <div class="section-label">Add Custom Preset</div>
-  <form method="post" action="/add" class="add-row">
-    <input class="name-input" type="text" name="label"
-           placeholder="Preset name" required maxlength="40">
-    <div class="rate-ctl">
-      <input type="range" class="rate-slider">
-      <input type="number" class="rate-num">
-      <select class="rate-unit">
-        <option value="kbit">Kbps</option>
-        <option value="mbit" selected>Mbps</option>
-        <option value="gbit">Gbps</option>
-      </select>
+  <form method="post" action="/add">
+    <div class="add-row">
+      <input class="name-input" type="text" name="label"
+             placeholder="Preset name" required maxlength="40">
+      <button type="submit" class="add-btn">+ Add</button>
+    </div>
+    <div class="rate-ctl" style="margin-top:0.4rem">
+      <button type="button" class="rate-chip" data-val="100mbit">100M</button>
+      <button type="button" class="rate-chip" data-val="200mbit">200M</button>
+      <button type="button" class="rate-chip is-active" data-val="500mbit">500M</button>
+      <button type="button" class="rate-chip" data-val="1gbit">1G</button>
+      <button type="button" class="rate-chip" data-val="2gbit">2G</button>
+      <button type="button" class="rate-chip" data-val="5gbit">5G</button>
+      <button type="button" class="rate-chip" data-val="custom">···</button>
+      <div class="rate-custom-row">
+        <input type="number" class="rate-num" min="1" max="9999">
+        <select class="rate-unit">
+          <option value="kbit">Kbps</option>
+          <option value="mbit">Mbps</option>
+          <option value="gbit">Gbps</option>
+        </select>
+      </div>
       <input type="hidden" name="rate" class="rate-val" value="500mbit" required>
     </div>
-    <button type="submit" class="add-btn">+ Add</button>
   </form>
 </div>
 
@@ -721,13 +731,7 @@ async function startSpeedTest() {
   stPoll = setInterval(pollSpeedtest, 500);
 }
 
-// ── Rate controls (slider + number + unit) ────────────────────────────────────
-const UNIT_CFG = {
-  kbit: { min: 100,  max: 10000, step: 100 },
-  mbit: { min: 10,   max: 1000,  step: 10  },
-  gbit: { min: 0.1,  max: 10,    step: 0.1 },
-};
-
+// ── Rate chip controls ────────────────────────────────────────────────────────
 function parseRate(s) {
   const m = (s || '').match(/^(\d+(?:\.\d+)?)\s*(kbit|mbit|gbit)/i);
   if (!m) return { val: 500, unit: 'mbit' };
@@ -735,36 +739,73 @@ function parseRate(s) {
 }
 
 function initRateControl(ctl) {
-  const slider = ctl.querySelector('.rate-slider');
-  const num    = ctl.querySelector('.rate-num');
-  const unit   = ctl.querySelector('.rate-unit');
-  const hidden = ctl.querySelector('.rate-val');
+  const chips     = Array.from(ctl.querySelectorAll('.rate-chip[data-val]'));
+  const hidden    = ctl.querySelector('.rate-val');
+  const customRow = ctl.querySelector('.rate-custom-row');
+  const num       = customRow && customRow.querySelector('.rate-num');
+  const unit      = customRow && customRow.querySelector('.rate-unit');
 
-  function applyUnit(u) {
-    const c = UNIT_CFG[u];
-    slider.min = c.min; slider.max = c.max; slider.step = c.step;
-    num.min = c.min;    num.max = c.max;    num.step = c.step;
+  function getSub() { const f = ctl.closest('form'); return f && f.querySelector('.sub'); }
+
+  function activateChip(chip) {
+    chips.forEach(c => c.classList.remove('is-active'));
+    if (chip) chip.classList.add('is-active');
   }
 
-  function sync(val, u) {
-    const c = UNIT_CFG[u];
-    const v = Math.max(c.min, Math.min(c.max, Math.round(val / c.step) * c.step));
-    slider.value = v;
-    num.value    = v;
-    hidden.value = v + u;
-    // Update the preset's sub-label so the button always shows the live rate
-    const sub = ctl.closest('form').querySelector('.sub');
-    if (sub) sub.textContent = v + u;
+  function setRate(val) {
+    hidden.value = val;
+    const sub = getSub();
+    if (sub) sub.textContent = val;
   }
 
-  const { val, unit: u } = parseRate(hidden.value);
-  unit.value = u;
-  applyUnit(u);
-  sync(val, u);
+  function openCustom(open) {
+    if (!customRow) return;
+    customRow.classList.toggle('open', open);
+  }
 
-  slider.addEventListener('input',  () => sync(parseFloat(slider.value), unit.value));
-  num.addEventListener('input',     () => sync(parseFloat(num.value) || 0, unit.value));
-  unit.addEventListener('change',   () => { applyUnit(unit.value); sync(parseFloat(num.value) || 0, unit.value); });
+  // ── Init from stored value ──
+  const stored = hidden.value;
+  const exactChip = chips.find(c => c.dataset.val === stored);
+  if (exactChip) {
+    activateChip(exactChip);
+  } else {
+    // Value doesn't match a chip — show custom row pre-filled
+    const { val, unit: u } = parseRate(stored);
+    if (num)  num.value  = val;
+    if (unit) unit.value = u;
+    openCustom(true);
+    activateChip(chips.find(c => c.dataset.val === 'custom') || null);
+  }
+
+  // ── Chip clicks ──
+  chips.forEach(chip => {
+    chip.addEventListener('click', e => {
+      e.preventDefault();
+      activateChip(chip);
+      if (chip.dataset.val === 'custom') {
+        openCustom(true);
+        // Pre-fill custom inputs from current stored value
+        if (num && unit) {
+          const { val, unit: u } = parseRate(hidden.value);
+          num.value  = val;
+          unit.value = u;
+        }
+        if (num) num.focus();
+      } else {
+        openCustom(false);
+        setRate(chip.dataset.val);
+      }
+    });
+  });
+
+  // ── Custom inputs ──
+  function syncCustom() {
+    const v = parseFloat(num.value);
+    const u = unit ? unit.value : 'mbit';
+    if (v > 0) setRate(v + u);
+  }
+  if (num)  num.addEventListener('input',   syncCustom);
+  if (unit) unit.addEventListener('change', syncCustom);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -810,17 +851,27 @@ BUILTIN_ROW = """\
     <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
     <span class="apply-arrow">›</span>
   </button>
-  <div class="rate-ctl">
-    <input type="range" class="rate-slider">
-    <input type="number" class="rate-num">
-    <select class="rate-unit">
-      <option value="kbit">Kbps</option>
-      <option value="mbit">Mbps</option>
-      <option value="gbit">Gbps</option>
-    </select>
-    <input type="hidden" name="rate" class="rate-val" value="{rate}">
+  <div class="rate-row">
+    <div class="rate-ctl">
+      <button type="button" class="rate-chip" data-val="100mbit">100M</button>
+      <button type="button" class="rate-chip" data-val="200mbit">200M</button>
+      <button type="button" class="rate-chip" data-val="500mbit">500M</button>
+      <button type="button" class="rate-chip" data-val="1gbit">1G</button>
+      <button type="button" class="rate-chip" data-val="2gbit">2G</button>
+      <button type="button" class="rate-chip" data-val="5gbit">5G</button>
+      <button type="button" class="rate-chip" data-val="custom">···</button>
+      <div class="rate-custom-row">
+        <input type="number" class="rate-num" min="1" max="9999">
+        <select class="rate-unit">
+          <option value="kbit">Kbps</option>
+          <option value="mbit">Mbps</option>
+          <option value="gbit">Gbps</option>
+        </select>
+      </div>
+      <input type="hidden" name="rate" class="rate-val" value="{rate}">
+    </div>
+    <button type="submit" formaction="/save" class="icon-btn">Save</button>
   </div>
-  <button type="submit" formaction="/save" class="icon-btn">Save</button>
 </form>"""
 
 CUSTOM_ROW = """\
@@ -830,20 +881,30 @@ CUSTOM_ROW = """\
     <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
     <span class="apply-arrow">›</span>
   </button>
-  <div class="rate-ctl">
-    <input type="range" class="rate-slider">
-    <input type="number" class="rate-num">
-    <select class="rate-unit">
-      <option value="kbit">Kbps</option>
-      <option value="mbit">Mbps</option>
-      <option value="gbit">Gbps</option>
-    </select>
-    <input type="hidden" name="rate" class="rate-val" value="{rate}">
+  <div class="rate-row">
+    <div class="rate-ctl">
+      <button type="button" class="rate-chip" data-val="100mbit">100M</button>
+      <button type="button" class="rate-chip" data-val="200mbit">200M</button>
+      <button type="button" class="rate-chip" data-val="500mbit">500M</button>
+      <button type="button" class="rate-chip" data-val="1gbit">1G</button>
+      <button type="button" class="rate-chip" data-val="2gbit">2G</button>
+      <button type="button" class="rate-chip" data-val="5gbit">5G</button>
+      <button type="button" class="rate-chip" data-val="custom">···</button>
+      <div class="rate-custom-row">
+        <input type="number" class="rate-num" min="1" max="9999">
+        <select class="rate-unit">
+          <option value="kbit">Kbps</option>
+          <option value="mbit">Mbps</option>
+          <option value="gbit">Gbps</option>
+        </select>
+      </div>
+      <input type="hidden" name="rate" class="rate-val" value="{rate}">
+    </div>
+    <button type="submit" formaction="/save" class="icon-btn">Save</button>
+    <button type="submit" formaction="/delete"
+            onclick="return confirm('Delete &quot;{label}&quot;?')"
+            class="icon-btn del">&#10005;</button>
   </div>
-  <button type="submit" formaction="/save" class="icon-btn">Save</button>
-  <button type="submit" formaction="/delete"
-          onclick="return confirm('Delete &quot;{label}&quot;?')"
-          class="icon-btn del">&#10005;</button>
 </form>"""
 
 
