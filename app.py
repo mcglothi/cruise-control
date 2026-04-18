@@ -169,6 +169,16 @@ def apply_ingress_limit(rate):
         return False, f"tc HTB error: {(r1.stderr or r2.stderr).strip()}"
     return True, f"Limiting inbound to {rate}"
 
+def get_link_speed_bps():
+    """Read the negotiated link speed from sysfs. Returns bits per second, 0 if unknown."""
+    try:
+        with open(f"/sys/class/net/{IFACE}/speed") as f:
+            mbps = int(f.read().strip())
+        return mbps * 1_000_000 if mbps > 0 else 0
+    except Exception:
+        return 0
+
+
 def get_status(cfg):
     result  = run(f"tc class show dev {IFB_DEV}")
     active  = "clear"
@@ -207,6 +217,7 @@ def api_stats():
         "rx_bps": rx, "tx_bps": tx,
         "mode": active, "mode_label": label,
         "limit_bps": limit_bps, "tc_raw": tc_raw,
+        "link_speed_bps": get_link_speed_bps(),
     }), mimetype="application/json")
 
 @app.route("/api/speedtest/start", methods=["POST"])
@@ -320,6 +331,7 @@ a { color:var(--blue); }
 .stat-val.rx { color:var(--blue); }
 .stat-val.tx { color:var(--muted); font-size:1.2rem; }
 .stat-unit { font-size:0.8rem; font-weight:500; margin-left:2px; color:var(--muted); }
+.speed-context { font-size:0.68rem; font-weight:600; letter-spacing:0.06em; color:var(--muted); margin-top:0.35rem; font-family:monospace; }
 
 .mode-badge {
   margin-top:1rem; padding:0.5rem 0.75rem;
@@ -486,6 +498,7 @@ footer {
     <div class="stat-box">
       <div class="stat-label">↓ Inbound</div>
       <div class="stat-val rx" id="rx-val">—<span class="stat-unit" id="rx-unit"></span></div>
+      <div class="speed-context" id="speed-context"></div>
     </div>
     <div class="stat-box">
       <div class="stat-label">↑ Outbound</div>
@@ -567,10 +580,24 @@ async function pollStats() {
     document.getElementById('tx-val').childNodes[0].nodeValue = tx.val;
     document.getElementById('tx-unit').textContent = ' ' + tx.unit;
 
-    // Speed bar: fill relative to active limit (or 1Gbps baseline if unrestricted)
-    limitBps = d.limit_bps || 1e9;
+    // Speed bar: fill relative to active limit (or link speed if unrestricted)
+    limitBps = d.limit_bps || d.link_speed_bps || 1e9;
     const pct = Math.min(100, (d.rx_bps / limitBps) * 100).toFixed(1);
     document.getElementById('speed-bar').style.width = pct + '%';
+
+    // Limit / link speed context line
+    const ctx = document.getElementById('speed-context');
+    if (d.link_speed_bps > 0) {
+      const link = fmtBps(d.link_speed_bps);
+      if (d.limit_bps > 0) {
+        const lim = fmtBps(d.limit_bps);
+        ctx.textContent = lim.val + ' ' + lim.unit + ' limit / ' + link.val + ' ' + link.unit + ' link';
+      } else {
+        ctx.textContent = 'no limit / ' + link.val + ' ' + link.unit + ' link';
+      }
+    } else {
+      ctx.textContent = d.limit_bps > 0 ? fmtBps(d.limit_bps).val + ' ' + fmtBps(d.limit_bps).unit + ' limit' : '';
+    }
 
     const mv = document.getElementById('mode-live');
     mv.textContent = d.mode_label;
