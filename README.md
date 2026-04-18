@@ -1,5 +1,7 @@
 # Cruise Control
 
+![Cruise Control](./hero_graphic.png)
+
 > Inbound bandwidth throttle for GB10-class machines — web GUI, live speed display, named presets, one-command install.
 
 ---
@@ -19,10 +21,6 @@ You set a rate, hit a button, and the machine stays under that ceiling until you
 - Live RX/TX display updates every second in the browser
 
 ---
-
-## Screenshots
-
-> *(branding and screenshots coming)*
 
 ---
 
