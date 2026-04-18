@@ -1,0 +1,24 @@
+[Unit]
+Description=Cruise Control — GB10 Inbound Bandwidth Throttle
+After=network.target
+Documentation=https://github.com/mcglothi/cruise-control
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/cruise-control/app.py
+WorkingDirectory=/opt/cruise-control
+Environment=THROTTLE_IFACE=enP7s7
+Restart=on-failure
+RestartSec=5
+
+# Run as root so tc/ip commands work
+User=root
+
+# Clean shutdown — ensures tc rules are cleared on stop
+ExecStop=/bin/sh -c 'tc qdisc del dev $THROTTLE_IFACE ingress 2>/dev/null; tc qdisc del dev ifb0 root 2>/dev/null; ip link del ifb0 2>/dev/null; true'
+
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
