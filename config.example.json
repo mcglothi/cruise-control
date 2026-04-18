@@ -1,0 +1,17 @@
+{
+  "business": {
+    "rate": "1gbit",
+    "label": "Business Hours",
+    "builtin": true
+  },
+  "heavy": {
+    "rate": "200mbit",
+    "label": "Heavy Throttle",
+    "builtin": true
+  },
+  "all_hands": {
+    "rate": "100mbit",
+    "label": "All Hands Meeting",
+    "builtin": false
+  }
+}
