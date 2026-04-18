@@ -290,10 +290,18 @@ a { color:var(--blue); }
 /* ── Header ── */
 .header {
   width:100%; max-width:640px;
-  display:flex; align-items:flex-start; justify-content:space-between;
+  display:flex; align-items:center; justify-content:space-between;
   margin-bottom:1.5rem;
 }
-.title-img { height:216px; width:auto; display:block; }
+.title-text {
+  font-family:"Arial Black","Franklin Gothic Heavy","Impact",sans-serif;
+  font-size:1.65rem; font-weight:900; font-style:italic;
+  letter-spacing:0.06em; text-transform:uppercase;
+  background:linear-gradient(180deg, #e8f8ff 0%, #a8e8ff 25%, #38c8f8 60%, #0890c8 100%);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  background-clip:text;
+  filter:drop-shadow(0 0 8px rgba(56,200,248,0.65));
+}
 .header h1 span { color:var(--blue); }
 .live-dot {
   display:inline-flex; align-items:center; gap:6px;
@@ -527,7 +535,7 @@ footer {
 <body>
 
 <div class="header">
-  <img src="/assets/title.png" alt="Cruise Control" class="title-img">
+  <span class="title-text">Cruise Control</span>
   <span class="live-dot">Live</span>
 </div>
 <p class="subhead">{{ iface }} &nbsp;·&nbsp; {{ hostname }}</p>
