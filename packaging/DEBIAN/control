@@ -1,0 +1,19 @@
+Package: cruise-control
+Version: 1.1.0
+Architecture: arm64
+Maintainer: Tim McGlothi <timmcg@gmail.com>
+Depends: python3, python3-flask, iproute2
+Recommends: kmod
+Description: GB10 inbound bandwidth throttle web GUI
+ Cruise Control is a web-based interface for rate-limiting inbound
+ (download) network traffic on GB10-class machines. Uses Linux tc
+ with IFB to shape ingress traffic. Useful for throttling model
+ downloads during business hours or high-demand windows.
+ .
+ Features:
+  - Live inbound/outbound speed display
+  - Named presets with editable rates (saved across restarts)
+  - Custom preset add/delete
+  - Built-in speed test to validate settings
+  - Systemd service (auto-start on boot)
+Homepage: https://github.com/mcglothi/cruise-control

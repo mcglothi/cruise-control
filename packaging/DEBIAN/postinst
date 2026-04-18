@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+# Auto-detect the primary network interface (used for the default route)
+detect_iface() {
+    ip route | awk '$1=="default"{print $5}' | head -1
+}
+
+SERVICE=/etc/systemd/system/cruise-control.service
+
+# Patch interface name in the service file
+IFACE=$(detect_iface)
+if [ -n "$IFACE" ]; then
+    sed -i "s|THROTTLE_IFACE=.*|THROTTLE_IFACE=${IFACE}|" "$SERVICE"
+    echo "cruise-control: interface set to ${IFACE}"
+else
+    echo "cruise-control: WARNING — could not detect interface, defaulting to enP7s7"
+fi
+
+systemctl daemon-reload
+systemctl enable cruise-control.service
+systemctl restart cruise-control.service
+
+echo "cruise-control: web UI available at http://$(hostname -I | awk '{print $1}'):8090"

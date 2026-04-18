@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+# Stop service and clean up tc rules before removal
+if systemctl is-active --quiet cruise-control.service 2>/dev/null; then
+    systemctl stop cruise-control.service
+fi
+
+systemctl disable cruise-control.service 2>/dev/null || true

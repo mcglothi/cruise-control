@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
 """
-Cruise Control — GB10 Bandwidth Throttle
-Web GUI to rate-limit inbound traffic (model downloads) on GB10-class machines.
-
-Uses Linux tc + IFB to limit ingress (inbound) throughput.
-Runs as root (needed for tc/ip). Listens on 0.0.0.0:8090.
-Config persisted to config.json alongside this file.
+Cruise Control — GB10 Inbound Bandwidth Throttle
+Limits inbound (download) traffic via Linux tc + IFB.
+Serves a live web GUI on port 8090.
+Runs as root. Config persisted to config.json alongside this file.
 """
 
-import subprocess
-import os
-import json
-import re
-import socket
-from flask import Flask, request, redirect, url_for
+import subprocess, os, json, re, socket, threading, time
+from flask import Flask, request, redirect, url_for, Response, render_template_string
 
-IFACE      = os.environ.get("THROTTLE_IFACE", "enP7s7")
-IFB_DEV    = "ifb0"
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-HOSTNAME   = socket.gethostname()
-
-BUILTINS = ["business", "heavy"]
-
-DEFAULTS = {
-    "business": {"rate": "1gbit",   "label": "Business Hours",  "builtin": True},
-    "heavy":    {"rate": "200mbit", "label": "Heavy Throttle",  "builtin": True},
+IFACE        = os.environ.get("THROTTLE_IFACE", "enP7s7")
+IFB_DEV      = "ifb0"
+SPEEDTEST_URL = os.environ.get("SPEEDTEST_URL", "http://speedtest.tele2.net/100MB.zip")
+CONFIG_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+HOSTNAME     = socket.gethostname()
+BUILTINS     = ["business", "heavy"]
+DEFAULTS     = {
+    "business": {"rate": "1gbit",   "label": "Business Hours", "builtin": True},
+    "heavy":    {"rate": "200mbit", "label": "Heavy Throttle", "builtin": True},
 }
-
 RATE_RE = re.compile(r"^\d+(\.\d+)?\s*(kbit|mbit|gbit|kbps|mbps|gbps)$", re.IGNORECASE)
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -47,79 +39,141 @@ def load_config():
         data[key]["builtin"] = True
     return data
 
-
 def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
 
-
 def slugify(label):
     return SLUG_RE.sub("_", label.lower()).strip("_")[:32]
 
+def rate_to_bps(rate_str):
+    """Convert tc rate string to bits per second."""
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(kbit|mbit|gbit|kbps|mbps|gbps)$", rate_str.strip(), re.I)
+    if not m:
+        return 0
+    val, unit = float(m.group(1)), m.group(2).lower()
+    mult = {"kbit": 1e3, "mbit": 1e6, "gbit": 1e9, "kbps": 8e3, "mbps": 8e6, "gbps": 8e9}
+    return int(val * mult.get(unit, 1))
 
-# ── tc / IFB helpers ──────────────────────────────────────────────────────────
+
+# ── Live stats ────────────────────────────────────────────────────────────────
+
+_stats      = {"rx_bps": 0, "tx_bps": 0}
+_stats_lock = threading.Lock()
+
+def _read_iface_bytes():
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f:
+                if IFACE + ":" in line:
+                    parts = line.split()
+                    return int(parts[1]), int(parts[9])  # rx_bytes, tx_bytes
+    except Exception:
+        pass
+    return 0, 0
+
+def _stats_collector():
+    prev_rx, prev_tx = _read_iface_bytes()
+    while True:
+        time.sleep(1)
+        rx, tx = _read_iface_bytes()
+        with _stats_lock:
+            _stats["rx_bps"] = max(0, (rx - prev_rx) * 8)
+            _stats["tx_bps"] = max(0, (tx - prev_tx) * 8)
+        prev_rx, prev_tx = rx, tx
+
+threading.Thread(target=_stats_collector, daemon=True).start()
+
+
+# ── Speed test ────────────────────────────────────────────────────────────────
+
+_stest      = {"status": "idle", "speed_bps": 0, "progress": 0, "error": ""}
+_stest_lock = threading.Lock()
+
+def _run_speedtest():
+    """
+    Download via curl (handles auth/TLS/redirects cleanly) and report speed.
+    While curl runs, sample live RX from the stats thread every 500 ms so the
+    UI shows a real-time speed number during the test.
+    """
+    with _stest_lock:
+        _stest.update({"status": "running", "speed_bps": 0, "progress": 0, "error": ""})
+
+    MAX_SECS = 12
+    try:
+        proc = subprocess.Popen(
+            ["curl", "-o", "/dev/null", "-s",
+             "--max-time", str(MAX_SECS),
+             "-w", "%{speed_download}",   # bytes/sec printed to stdout on exit
+             SPEEDTEST_URL],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        start = time.monotonic()
+        while proc.poll() is None:
+            time.sleep(0.5)
+            elapsed = time.monotonic() - start
+            # Borrow live RX from the stats thread as the "current" speed
+            with _stats_lock:
+                live_rx = _stats["rx_bps"]
+            progress = min(99, int(elapsed / MAX_SECS * 100))
+            with _stest_lock:
+                _stest.update({"speed_bps": live_rx, "progress": progress})
+
+        stdout, _ = proc.communicate()
+        if proc.returncode == 0:
+            bytes_per_sec = float(stdout.decode().strip() or "0")
+            with _stest_lock:
+                _stest.update({
+                    "status": "done",
+                    "speed_bps": int(bytes_per_sec * 8),
+                    "progress": 100,
+                })
+        else:
+            with _stest_lock:
+                _stest.update({"status": "error", "error": f"curl exit {proc.returncode}"})
+    except Exception as exc:
+        with _stest_lock:
+            _stest.update({"status": "error", "error": str(exc)})
+
+
+# ── tc / IFB ──────────────────────────────────────────────────────────────────
 
 def run(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
-
 def clear_all():
-    """Remove all cruise-control tc rules and tear down IFB."""
     run(f"tc qdisc del dev {IFACE} ingress 2>/dev/null || true")
     run(f"tc qdisc del dev {IFACE} root    2>/dev/null || true")
     run(f"tc qdisc del dev {IFB_DEV} root  2>/dev/null || true")
     run(f"ip link set {IFB_DEV} down       2>/dev/null || true")
     run(f"ip link del {IFB_DEV}            2>/dev/null || true")
 
-
 def apply_ingress_limit(rate):
-    """
-    Rate-limit inbound traffic (model downloads) using IFB redirect.
-    IFB mirrors ingress to a virtual egress queue where HTB can shape it.
-    Returns (ok, message).
-    """
     clear_all()
-
-    # Load IFB module and bring up virtual interface
     run("modprobe ifb numifbs=1")
     run(f"ip link add {IFB_DEV} type ifb 2>/dev/null || true")
-    r_up = run(f"ip link set {IFB_DEV} up")
-    if r_up.returncode != 0:
-        return False, f"Could not bring up {IFB_DEV}: {r_up.stderr.strip()}"
-
-    # Redirect ingress of IFACE into IFB egress
+    r = run(f"ip link set {IFB_DEV} up")
+    if r.returncode != 0:
+        return False, f"Could not bring up {IFB_DEV}: {r.stderr.strip()}"
     run(f"tc qdisc add dev {IFACE} handle ffff: ingress")
-    r_filt = run(
-        f"tc filter add dev {IFACE} parent ffff: protocol ip "
-        f"u32 match u32 0 0 action mirred egress redirect dev {IFB_DEV}"
-    )
-    if r_filt.returncode != 0:
+    r = run(f"tc filter add dev {IFACE} parent ffff: protocol ip "
+            f"u32 match u32 0 0 action mirred egress redirect dev {IFB_DEV}")
+    if r.returncode != 0:
         clear_all()
-        return False, f"tc filter error: {r_filt.stderr.strip()}"
-
-    # HTB on IFB device
+        return False, f"tc filter error: {r.stderr.strip()}"
     r1 = run(f"tc qdisc add dev {IFB_DEV} root handle 1: htb default 10")
-    r2 = run(
-        f"tc class add dev {IFB_DEV} parent 1: classid 1:10 "
-        f"htb rate {rate} ceil {rate} burst 256k"
-    )
+    r2 = run(f"tc class add dev {IFB_DEV} parent 1: classid 1:10 "
+             f"htb rate {rate} ceil {rate} burst 256k")
     if r1.returncode != 0 or r2.returncode != 0:
         clear_all()
-        err = (r1.stderr or r2.stderr).strip()
-        return False, f"tc HTB error: {err}"
-
+        return False, f"tc HTB error: {(r1.stderr or r2.stderr).strip()}"
     return True, f"Limiting inbound to {rate}"
 
-
 def get_status(cfg):
-    """
-    Returns (active_mode_key, human_summary).
-    Checks IFB device for active HTB class.
-    """
-    result = run(f"tc class show dev {IFB_DEV}")
-    tc_summary = "no limit — full line rate"
-    active = "clear"
-
+    result  = run(f"tc class show dev {IFB_DEV}")
+    active  = "clear"
+    limit_bps = 0
+    tc_raw  = "no limit — full line rate"
     for line in result.stdout.splitlines():
         if "rate" not in line:
             continue
@@ -127,171 +181,450 @@ def get_status(cfg):
         if "rate" not in parts:
             continue
         idx = parts.index("rate")
-        live_rate = (parts[idx + 1] if idx + 1 < len(parts) else "").lower()
-        tc_summary = f"inbound capped at {live_rate} via IFB"
-
+        live = (parts[idx + 1] if idx + 1 < len(parts) else "").lower()
+        tc_raw = f"inbound capped at {live}"
         for key, mcfg in cfg.items():
-            if mcfg.get("rate", "").lower() == live_rate:
+            if mcfg.get("rate", "").lower() == live:
                 active = key
                 break
         else:
             active = "custom"
+        limit_bps = rate_to_bps(live)
         break
+    return active, tc_raw, limit_bps
 
-    return active, tc_summary
+
+# ── API routes ────────────────────────────────────────────────────────────────
+
+@app.route("/api/stats")
+def api_stats():
+    with _stats_lock:
+        rx, tx = _stats["rx_bps"], _stats["tx_bps"]
+    cfg = load_config()
+    active, tc_raw, limit_bps = get_status(cfg)
+    label = cfg[active]["label"] if active in cfg else ("Unrestricted" if active == "clear" else "Custom")
+    return Response(json.dumps({
+        "rx_bps": rx, "tx_bps": tx,
+        "mode": active, "mode_label": label,
+        "limit_bps": limit_bps, "tc_raw": tc_raw,
+    }), mimetype="application/json")
+
+@app.route("/api/speedtest/start", methods=["POST"])
+def api_speedtest_start():
+    with _stest_lock:
+        status = _stest["status"]
+    if status == "running":
+        return Response(json.dumps({"ok": False, "msg": "Already running"}), mimetype="application/json")
+    threading.Thread(target=_run_speedtest, daemon=True).start()
+    return Response(json.dumps({"ok": True}), mimetype="application/json")
+
+@app.route("/api/speedtest/status")
+def api_speedtest_status():
+    with _stest_lock:
+        data = dict(_stest)
+    return Response(json.dumps(data), mimetype="application/json")
 
 
-# ── HTML ──────────────────────────────────────────────────────────────────────
+# ── Page ──────────────────────────────────────────────────────────────────────
 
-PAGE = """\
-<!DOCTYPE html>
+PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cruise Control — {hostname}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cruise Control</title>
 <style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: #0d1117; color: #e6edf3;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  min-height: 100vh; display: flex; align-items: center;
-  justify-content: center; padding: 2rem;
-}}
-.card {{
-  background: #161b22; border: 1px solid #30363d;
-  border-radius: 12px; padding: 2rem; width: 100%; max-width: 600px;
-}}
-h1 {{ font-size: 1.4rem; color: #58a6ff; margin-bottom: 0.2rem; }}
-.subtitle {{ color: #8b949e; font-size: 0.85rem; margin-bottom: 1.75rem; }}
+:root {
+  --bg:      #08090d;
+  --surface: #0f1117;
+  --card:    #141720;
+  --border:  #1e2130;
+  --border2: #252a3a;
+  --text:    #d4d8e8;
+  --muted:   #5a607a;
+  --dim:     #3a4060;
+  --blue:    #4d9fff;
+  --blue-d:  #1a3a6a;
+  --green:   #3dd68c;
+  --green-d: #0f2e20;
+  --amber:   #f0b429;
+  --amber-d: #2a1f00;
+  --red:     #f25c54;
+  --red-d:   #2a0d0b;
+  --purple:  #a78bfa;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body {
+  background:var(--bg); color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:14px; line-height:1.5;
+  min-height:100vh; display:flex; flex-direction:column;
+  align-items:center; padding:2rem 1rem;
+}
+a { color:var(--blue); }
 
-.status-box {{
-  background: #0d1117; border: 1px solid #30363d;
-  border-radius: 8px; padding: 0.9rem 1.2rem; margin-bottom: 1.75rem;
-}}
-.status-label {{
-  font-size: 0.72rem; text-transform: uppercase;
-  letter-spacing: 0.08em; color: #8b949e;
-}}
-.status-value {{ font-size: 1.05rem; font-weight: 600; margin: 0.2rem 0 0.35rem; }}
-.status-value.clear    {{ color: #3fb950; }}
-.status-value.active   {{ color: #58a6ff; }}
-.status-value.custom   {{ color: #a371f7; }}
-.tc-raw {{ font-family: monospace; font-size: 0.76rem; color: #6e7681; }}
+/* ── Header ── */
+.header {
+  width:100%; max-width:640px;
+  display:flex; align-items:baseline; justify-content:space-between;
+  margin-bottom:1.5rem;
+}
+.header h1 {
+  font-size:1.5rem; font-weight:700; letter-spacing:-0.02em;
+  color:#fff;
+}
+.header h1 span { color:var(--blue); }
+.live-dot {
+  display:inline-flex; align-items:center; gap:6px;
+  font-size:0.72rem; font-weight:600; letter-spacing:0.08em;
+  text-transform:uppercase; color:var(--green);
+}
+.live-dot::before {
+  content:''; width:7px; height:7px; border-radius:50%;
+  background:var(--green); flex-shrink:0;
+  animation:pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity:1; } 50% { opacity:.35; }
+}
+.subhead {
+  font-size:0.78rem; color:var(--muted); margin-bottom:1.5rem;
+  font-family:monospace;
+}
 
-.flash {{ border-radius: 6px; padding: 0.55rem 1rem; margin-bottom: 1.1rem; font-size: 0.875rem; }}
-.flash.ok    {{ background: #1c2a1c; border: 1px solid #3fb950; color: #3fb950; }}
-.flash.error {{ background: #2d1a1a; border: 1px solid #f85149; color: #f85149; }}
+/* ── Card ── */
+.card {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:1.25rem 1.5rem;
+  width:100%; max-width:640px; margin-bottom:1rem;
+}
+.card-title {
+  font-size:0.68rem; font-weight:700; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:1rem;
+}
 
-.section-label {{
-  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
-  color: #484f58; margin-bottom: 0.5rem; margin-top: 1.25rem;
-}}
-.section-label:first-of-type {{ margin-top: 0; }}
+/* ── Live stats ── */
+.stats-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:1rem;
+}
+.stat-box { }
+.stat-label {
+  font-size:0.68rem; font-weight:600; letter-spacing:0.1em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:0.2rem;
+}
+.stat-val {
+  font-size:2rem; font-weight:700; font-family:monospace;
+  letter-spacing:-0.02em; color:#fff; line-height:1;
+  transition:color 0.3s;
+}
+.stat-val.rx { color:var(--blue); }
+.stat-val.tx { color:var(--muted); font-size:1.2rem; }
+.stat-unit { font-size:0.8rem; font-weight:500; margin-left:2px; color:var(--muted); }
 
-.mode-row {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }}
-.apply-btn {{
-  flex: 1; padding: 0.75rem 1rem; border: 1px solid #30363d;
-  border-radius: 8px; cursor: pointer; text-align: left;
-  font-size: 0.9rem; font-weight: 600; background: #1c2128;
-  color: #e6edf3; transition: border-color 0.15s, opacity 0.15s;
-}}
-.apply-btn:hover {{ border-color: #58a6ff; opacity: 0.9; }}
-.apply-btn.is-active {{ border-color: #58a6ff; background: #1c2a3a; color: #58a6ff; }}
-.apply-btn .sub {{
-  display: block; font-size: 0.75rem; font-weight: 400;
-  color: #8b949e; margin-top: 0.15rem;
-}}
-.apply-btn.is-active .sub {{ color: #58a6ff; opacity: 0.75; }}
+.mode-badge {
+  margin-top:1rem; padding:0.5rem 0.75rem;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:6px; font-size:0.82rem;
+  display:flex; align-items:center; justify-content:space-between;
+}
+.mode-badge .label { color:var(--muted); }
+.mode-badge .value { font-weight:600; }
+.mode-badge .value.clear  { color:var(--green); }
+.mode-badge .value.active { color:var(--blue);  }
+.mode-badge .value.custom { color:var(--purple);}
+.mode-badge .tc-raw {
+  font-family:monospace; font-size:0.72rem; color:var(--dim);
+}
 
-.rate-input {{
-  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-  color: #e6edf3; font-size: 0.85rem; font-family: monospace;
-  padding: 0.45rem 0.6rem; width: 105px; text-align: right;
-}}
-.rate-input:focus {{ outline: none; border-color: #58a6ff; }}
+/* Speed bar */
+.speed-bar-wrap {
+  margin-top:0.9rem; height:3px;
+  background:var(--border); border-radius:2px; overflow:hidden;
+}
+.speed-bar {
+  height:100%; width:0%;
+  background:linear-gradient(90deg, var(--blue-d), var(--blue));
+  border-radius:2px; transition:width 0.8s ease;
+}
 
-.icon-btn {{
-  background: none; border: 1px solid #30363d; border-radius: 6px;
-  color: #8b949e; font-size: 0.8rem; padding: 0.45rem 0.6rem;
-  cursor: pointer; white-space: nowrap;
-}}
-.icon-btn:hover {{ border-color: #58a6ff; color: #58a6ff; }}
-.icon-btn.del:hover {{ border-color: #f85149; color: #f85149; }}
+/* ── Flash ── */
+.flash {
+  width:100%; max-width:640px;
+  border-radius:6px; padding:0.6rem 1rem; margin-bottom:1rem;
+  font-size:0.875rem;
+}
+.flash.ok    { background:var(--green-d); border:1px solid var(--green); color:var(--green); }
+.flash.error { background:var(--red-d);   border:1px solid var(--red);   color:var(--red);   }
 
-.clear-btn {{
-  width: 100%; padding: 0.7rem 1rem; margin-bottom: 0.6rem;
-  background: #1a2d1e; border: 1px solid #3fb950; border-radius: 8px;
-  color: #3fb950; font-size: 0.9rem; font-weight: 600; cursor: pointer;
-  text-align: center; transition: opacity 0.15s;
-}}
-.clear-btn:hover {{ opacity: 0.82; }}
-.clear-btn.is-active {{ filter: brightness(1.2); }}
+/* ── Section label ── */
+.section-label {
+  font-size:0.68rem; font-weight:700; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--muted);
+  margin-bottom:0.6rem; margin-top:0.25rem;
+}
 
-.add-section {{
-  margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid #21262d;
-}}
-.add-row {{ display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }}
-.add-row input[type=text] {{
-  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-  color: #e6edf3; font-size: 0.88rem; padding: 0.5rem 0.75rem;
-}}
-.add-row input[type=text]:focus {{ outline: none; border-color: #58a6ff; }}
-.name-input {{ flex: 1; min-width: 130px; }}
-.add-btn {{
-  background: #1c2a3a; border: 1px solid #58a6ff; border-radius: 6px;
-  color: #58a6ff; font-size: 0.88rem; font-weight: 600;
-  padding: 0.5rem 1rem; cursor: pointer; white-space: nowrap;
-}}
-.add-btn:hover {{ opacity: 0.85; }}
-.hint {{ font-size: 0.72rem; color: #484f58; margin-top: 0.4rem; }}
+/* ── Mode rows ── */
+.mode-row {
+  display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;
+}
+.apply-btn {
+  flex:1; padding:0.7rem 1rem;
+  border:1px solid var(--border2); border-radius:8px;
+  background:var(--surface); color:var(--text);
+  font-size:0.88rem; font-weight:600;
+  cursor:pointer; text-align:left;
+  transition:border-color .15s, background .15s;
+}
+.apply-btn:hover { border-color:var(--blue); background:var(--blue-d); }
+.apply-btn.is-active {
+  border-color:var(--blue); background:var(--blue-d); color:var(--blue);
+}
+.apply-btn .sub {
+  display:block; font-size:0.72rem; font-weight:400;
+  font-family:monospace; color:var(--muted); margin-top:2px;
+}
+.apply-btn.is-active .sub { color:var(--blue); opacity:.7; }
 
-footer {{ margin-top: 1.5rem; font-size: 0.72rem; color: #484f58; text-align: center; }}
+.rate-input {
+  width:100px; padding:0.5rem 0.6rem; text-align:right;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--text);
+  font-size:0.82rem; font-family:monospace;
+}
+.rate-input:focus { outline:none; border-color:var(--blue); }
+
+.icon-btn {
+  padding:0.5rem 0.65rem;
+  background:none; border:1px solid var(--border2);
+  border-radius:6px; color:var(--muted);
+  font-size:0.78rem; cursor:pointer; white-space:nowrap;
+}
+.icon-btn:hover         { border-color:var(--blue);  color:var(--blue);  }
+.icon-btn.del:hover     { border-color:var(--red);   color:var(--red);   }
+
+.clear-btn {
+  width:100%; padding:0.7rem 1rem;
+  background:var(--green-d); border:1px solid var(--green);
+  border-radius:8px; color:var(--green);
+  font-size:0.88rem; font-weight:600; cursor:pointer; text-align:center;
+  transition:opacity .15s;
+}
+.clear-btn:hover { opacity:.8; }
+.clear-btn.is-active { filter:brightness(1.2); }
+
+/* ── Add preset ── */
+.add-row { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
+.add-row input {
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--text);
+  font-size:0.85rem; padding:0.5rem 0.75rem;
+}
+.add-row input:focus { outline:none; border-color:var(--blue); }
+.name-input { flex:1; min-width:140px; }
+.add-btn {
+  padding:0.5rem 1rem;
+  background:var(--blue-d); border:1px solid var(--blue);
+  border-radius:6px; color:var(--blue);
+  font-size:0.85rem; font-weight:600; cursor:pointer; white-space:nowrap;
+}
+.add-btn:hover { opacity:.85; }
+.hint { font-size:0.68rem; color:var(--dim); margin-top:0.4rem; }
+
+/* ── Speed test ── */
+.st-btn {
+  padding:0.65rem 1.25rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:8px; color:var(--text);
+  font-size:0.88rem; font-weight:600; cursor:pointer;
+  transition:border-color .15s;
+}
+.st-btn:hover:not(:disabled) { border-color:var(--blue); }
+.st-btn:disabled { opacity:.4; cursor:not-allowed; }
+.st-result {
+  margin-top:1rem; display:none;
+}
+.st-speed {
+  font-size:2rem; font-weight:700; font-family:monospace;
+  color:var(--amber); letter-spacing:-0.02em;
+}
+.st-speed .unit { font-size:0.85rem; color:var(--muted); margin-left:3px; }
+.st-bar-wrap {
+  margin-top:0.6rem; height:4px;
+  background:var(--border); border-radius:2px; overflow:hidden;
+}
+.st-bar {
+  height:100%; width:0%;
+  background:linear-gradient(90deg, var(--amber-d), var(--amber));
+  border-radius:2px; transition:width 0.4s ease;
+}
+.st-label {
+  margin-top:0.4rem; font-size:0.72rem;
+  font-family:monospace; color:var(--muted);
+}
+.st-error { color:var(--red); font-size:0.82rem; margin-top:0.5rem; }
+
+.divider { border:none; border-top:1px solid var(--border); margin:0.25rem 0; }
+footer {
+  margin-top:2rem; font-size:0.68rem; color:var(--dim); text-align:center;
+}
 </style>
 </head>
 <body>
+
+<div class="header">
+  <h1>Cruise <span>Control</span></h1>
+  <span class="live-dot">Live</span>
+</div>
+<p class="subhead">{{ iface }} &nbsp;·&nbsp; {{ hostname }}</p>
+
+{{ flash_html | safe }}
+
+<!-- Live stats -->
 <div class="card">
-  <h1>Cruise Control</h1>
-  <p class="subtitle">
-    Inbound throttle &nbsp;&middot;&nbsp;
-    Interface: <code>{iface}</code> &nbsp;&middot;&nbsp;
-    Host: <code>{hostname}</code>
-  </p>
-
-  {flash_html}
-
-  <div class="status-box">
-    <div class="status-label">Current Mode</div>
-    <div class="status-value {status_cls}">{active_label}</div>
-    <div class="tc-raw">{tc_raw}</div>
+  <div class="card-title">Network Activity</div>
+  <div class="stats-grid">
+    <div class="stat-box">
+      <div class="stat-label">↓ Inbound</div>
+      <div class="stat-val rx" id="rx-val">—<span class="stat-unit" id="rx-unit"></span></div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">↑ Outbound</div>
+      <div class="stat-val tx" id="tx-val">—<span class="stat-unit" id="tx-unit"></span></div>
+    </div>
   </div>
+  <div class="speed-bar-wrap"><div class="speed-bar" id="speed-bar"></div></div>
+  <div class="mode-badge">
+    <span class="label">Mode</span>
+    <span class="value" id="mode-live">—</span>
+    <span class="tc-raw" id="tc-raw-live"></span>
+  </div>
+</div>
 
-  <div class="section-label">Built-in Presets</div>
-  {builtin_rows}
-
+<!-- Presets -->
+<div class="card">
+  <div class="card-title">Built-in Presets</div>
+  {{ builtin_rows | safe }}
+  <hr class="divider" style="margin:0.75rem 0">
   <form method="post" action="/apply">
     <input type="hidden" name="mode" value="clear">
-    <button type="submit" class="clear-btn{clear_active_cls}">
-      Unrestricted — remove all limits
-    </button>
+    <button type="submit" class="clear-btn{{ clear_active }}">Unrestricted — remove all limits</button>
   </form>
 
-  {custom_section}
+  {{ custom_section | safe }}
 
-  <div class="add-section">
-    <div class="section-label">Add Custom Preset</div>
-    <form method="post" action="/add" class="add-row">
-      <input class="name-input" type="text" name="label"
-             placeholder="Preset name (e.g. All Hands)" required maxlength="40">
-      <input class="rate-input" type="text" name="rate"
-             placeholder="e.g. 500mbit" required>
-      <button type="submit" class="add-btn">+ Add</button>
-    </form>
-    <p class="hint">Valid units: kbit &nbsp;mbit &nbsp;gbit &nbsp;&middot;&nbsp; e.g. 100mbit &nbsp;500mbit &nbsp;1gbit &nbsp;2.5gbit</p>
-  </div>
-
-  <footer>cruise-control &nbsp;&middot;&nbsp; {hostname}</footer>
+  <hr class="divider" style="margin:1rem 0 0.75rem">
+  <div class="section-label">Add Custom Preset</div>
+  <form method="post" action="/add" class="add-row">
+    <input class="name-input" type="text" name="label"
+           placeholder="Preset name" required maxlength="40">
+    <input class="rate-input" type="text" name="rate"
+           placeholder="e.g. 500mbit" required style="width:110px">
+    <button type="submit" class="add-btn">+ Add</button>
+  </form>
+  <p class="hint">Units: kbit &nbsp;mbit &nbsp;gbit &nbsp;·&nbsp; e.g. 100mbit &nbsp;500mbit &nbsp;1gbit &nbsp;2.5gbit</p>
 </div>
+
+<!-- Speed test -->
+<div class="card">
+  <div class="card-title">Speed Test</div>
+  <p style="font-size:0.8rem;color:var(--muted);margin-bottom:0.75rem">
+    Measures this machine's inbound download speed — useful for validating
+    that a preset is working as expected.
+  </p>
+  <button class="st-btn" id="st-btn" onclick="startSpeedTest()">▶ Run Speed Test</button>
+  <div class="st-result" id="st-result">
+    <div class="st-speed"><span id="st-num">0</span><span class="unit" id="st-unit">Mbps</span></div>
+    <div class="st-bar-wrap"><div class="st-bar" id="st-bar"></div></div>
+    <div class="st-label" id="st-label">starting…</div>
+  </div>
+  <div class="st-error" id="st-error"></div>
+</div>
+
+<footer>cruise-control &nbsp;·&nbsp; {{ hostname }} &nbsp;·&nbsp; github.com/mcglothi/cruise-control</footer>
+
+<script>
+// ── Formatting ────────────────────────────────────────────────────────────────
+function fmtBps(bps) {
+  if (bps >= 1e9) return { val: (bps/1e9).toFixed(2), unit: 'Gbps' };
+  if (bps >= 1e6) return { val: (bps/1e6).toFixed(1), unit: 'Mbps' };
+  if (bps >= 1e3) return { val: (bps/1e3).toFixed(0), unit: 'Kbps' };
+  return { val: bps, unit: 'bps' };
+}
+
+// ── Live stats ────────────────────────────────────────────────────────────────
+let limitBps = 0;
+
+async function pollStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+
+    const rx = fmtBps(d.rx_bps);
+    document.getElementById('rx-val').childNodes[0].nodeValue = rx.val;
+    document.getElementById('rx-unit').textContent = ' ' + rx.unit;
+
+    const tx = fmtBps(d.tx_bps);
+    document.getElementById('tx-val').childNodes[0].nodeValue = tx.val;
+    document.getElementById('tx-unit').textContent = ' ' + tx.unit;
+
+    // Speed bar: fill relative to active limit (or 1Gbps baseline if unrestricted)
+    limitBps = d.limit_bps || 1e9;
+    const pct = Math.min(100, (d.rx_bps / limitBps) * 100).toFixed(1);
+    document.getElementById('speed-bar').style.width = pct + '%';
+
+    const mv = document.getElementById('mode-live');
+    mv.textContent = d.mode_label;
+    mv.className = 'value ' + (d.mode === 'clear' ? 'clear' : d.mode === 'custom' ? 'custom' : 'active');
+    document.getElementById('tc-raw-live').textContent = d.tc_raw;
+  } catch(e) {}
+}
+
+setInterval(pollStats, 1000);
+pollStats();
+
+// ── Speed test ────────────────────────────────────────────────────────────────
+let stPoll = null;
+
+async function startSpeedTest() {
+  document.getElementById('st-btn').disabled = true;
+  document.getElementById('st-error').textContent = '';
+  document.getElementById('st-result').style.display = 'block';
+  document.getElementById('st-bar').style.width = '0%';
+  document.getElementById('st-label').textContent = 'connecting…';
+
+  await fetch('/api/speedtest/start', { method: 'POST' });
+  stPoll = setInterval(pollSpeedtest, 500);
+}
+
+async function pollSpeedtest() {
+  try {
+    const r = await fetch('/api/speedtest/status');
+    const d = await r.json();
+
+    if (d.status === 'idle') return;
+
+    const sp = fmtBps(d.speed_bps);
+    document.getElementById('st-num').textContent = sp.val;
+    document.getElementById('st-unit').textContent = sp.unit;
+    document.getElementById('st-bar').style.width = d.progress + '%';
+
+    if (d.status === 'running') {
+      document.getElementById('st-label').textContent =
+        'downloading… ' + d.progress + '% complete';
+    } else if (d.status === 'done') {
+      document.getElementById('st-label').textContent =
+        'complete — ' + sp.val + ' ' + sp.unit + ' average';
+      clearInterval(stPoll);
+      document.getElementById('st-btn').disabled = false;
+    } else if (d.status === 'error') {
+      document.getElementById('st-error').textContent = 'Error: ' + d.error;
+      document.getElementById('st-result').style.display = 'none';
+      clearInterval(stPoll);
+      document.getElementById('st-btn').disabled = false;
+    }
+  } catch(e) {}
+}
+</script>
 </body>
 </html>"""
 
@@ -314,65 +647,51 @@ CUSTOM_ROW = """\
   <input class="rate-input" type="text" name="rate" value="{rate}" title="tc rate">
   <button type="submit" formaction="/save" class="icon-btn">Save</button>
   <button type="submit" formaction="/delete"
-          onclick="return confirm('Delete preset &quot;{label}&quot;?')"
+          onclick="return confirm('Delete &quot;{label}&quot;?')"
           class="icon-btn del">&#10005;</button>
 </form>"""
-
-CUSTOM_SECTION = """\
-<div class="section-label">Custom Presets</div>
-{rows}"""
 
 
 def render_page(flash="", flash_type="ok"):
     cfg = load_config()
-    active_mode, tc_raw = get_status(cfg)
+    active, tc_raw, _ = get_status(cfg)
 
-    flash_html = ""
-    if flash:
-        flash_html = f'<div class="flash {flash_type}">{flash}</div>'
+    flash_html = f'<div class="flash {flash_type}">{flash}</div>' if flash else ""
 
     builtin_rows = []
     for key in BUILTINS:
-        mcfg = cfg[key]
-        active_cls = " is-active" if active_mode == key else ""
+        m = cfg[key]
         builtin_rows.append(BUILTIN_ROW.format(
-            key=key, label=mcfg["label"], rate=mcfg["rate"], active_cls=active_cls,
+            key=key, label=m["label"], rate=m["rate"],
+            active_cls=" is-active" if active == key else "",
         ))
 
-    custom_rows = []
-    for key, mcfg in cfg.items():
-        if mcfg.get("builtin"):
-            continue
-        active_cls = " is-active" if active_mode == key else ""
-        custom_rows.append(CUSTOM_ROW.format(
-            key=key, label=mcfg["label"], rate=mcfg["rate"], active_cls=active_cls,
-        ))
+    custom_rows = [
+        CUSTOM_ROW.format(
+            key=k, label=v["label"], rate=v["rate"],
+            active_cls=" is-active" if active == k else "",
+        )
+        for k, v in cfg.items() if not v.get("builtin")
+    ]
 
     custom_section = ""
     if custom_rows:
-        custom_section = CUSTOM_SECTION.format(rows="\n".join(custom_rows))
+        custom_section = (
+            '<hr class="divider" style="margin:.75rem 0">'
+            '<div class="section-label">Custom Presets</div>'
+            + "\n".join(custom_rows)
+        )
 
-    if active_mode == "clear":
-        status_cls, active_label = "clear", "Unrestricted"
-    elif active_mode == "custom":
-        status_cls, active_label = "custom", "Custom"
-    else:
-        status_cls = "active"
-        active_label = cfg[active_mode]["label"] + " (" + cfg[active_mode]["rate"] + ")"
-
-    clear_active_cls = " is-active" if active_mode == "clear" else ""
-
-    return PAGE.format(
-        hostname=HOSTNAME, iface=IFACE,
+    return render_template_string(PAGE,
+        iface=IFACE, hostname=HOSTNAME,
         flash_html=flash_html,
-        status_cls=status_cls, active_label=active_label, tc_raw=tc_raw,
         builtin_rows="\n".join(builtin_rows),
-        clear_active_cls=clear_active_cls,
+        clear_active=" is-active" if active == "clear" else "",
         custom_section=custom_section,
     )
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Page routes ───────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def index():
@@ -381,94 +700,72 @@ def index():
         flash_type=request.args.get("flash_type", "ok"),
     )
 
-
 @app.route("/apply", methods=["POST"])
 def apply():
     mode = request.form.get("mode", "clear")
     rate = request.form.get("rate", "").strip()
-
     if mode == "clear":
         clear_all()
-        return redirect(url_for("index",
-            flash="Cleared — no bandwidth limit active.", flash_type="ok"))
-
+        return redirect(url_for("index", flash="Cleared — no bandwidth limit active.", flash_type="ok"))
     cfg = load_config()
     if mode not in cfg:
         return redirect(url_for("index", flash="Unknown preset.", flash_type="error"))
-
     if rate and RATE_RE.match(rate):
         cfg[mode]["rate"] = rate
         save_config(cfg)
         use_rate = rate
     elif rate:
         return redirect(url_for("index",
-            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.",
-            flash_type="error"))
+            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.", flash_type="error"))
     else:
         use_rate = cfg[mode]["rate"]
-
     ok, msg = apply_ingress_limit(use_rate)
-    label = cfg[mode]["label"]
     return redirect(url_for("index",
-        flash=f"{label}: {msg}" if ok else msg,
+        flash=f"{cfg[mode]['label']}: {msg}" if ok else msg,
         flash_type="ok" if ok else "error"))
-
 
 @app.route("/save", methods=["POST"])
 def save():
     mode = request.form.get("mode", "")
     rate = request.form.get("rate", "").strip()
-
-    cfg = load_config()
+    cfg  = load_config()
     if mode not in cfg:
         return redirect(url_for("index", flash="Unknown preset.", flash_type="error"))
     if not rate or not RATE_RE.match(rate):
         return redirect(url_for("index",
-            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.",
-            flash_type="error"))
-
+            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.", flash_type="error"))
     cfg[mode]["rate"] = rate
     save_config(cfg)
     return redirect(url_for("index",
-        flash=f"Saved '{cfg[mode]['label']}' default \u2192 {rate}",
-        flash_type="ok"))
-
+        flash=f"Saved '{cfg[mode]['label']}' → {rate}", flash_type="ok"))
 
 @app.route("/add", methods=["POST"])
 def add():
     label = request.form.get("label", "").strip()
     rate  = request.form.get("rate",  "").strip()
-
     if not label:
         return redirect(url_for("index", flash="Preset name is required.", flash_type="error"))
     if not rate or not RATE_RE.match(rate):
         return redirect(url_for("index",
-            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.",
-            flash_type="error"))
-
+            flash=f"Invalid rate '{rate}'. Use e.g. 500mbit, 1gbit.", flash_type="error"))
     cfg = load_config()
     key = slugify(label)
     if not key:
         return redirect(url_for("index", flash="Invalid preset name.", flash_type="error"))
     if key in cfg:
         key = key + "_2"
-
     cfg[key] = {"label": label, "rate": rate, "builtin": False}
     save_config(cfg)
     return redirect(url_for("index", flash=f"Added preset '{label}' at {rate}", flash_type="ok"))
 
-
 @app.route("/delete", methods=["POST"])
 def delete():
     mode = request.form.get("mode", "")
-    cfg = load_config()
-
+    cfg  = load_config()
     if mode not in cfg:
         return redirect(url_for("index", flash="Unknown preset.", flash_type="error"))
     if cfg[mode].get("builtin"):
-        return redirect(url_for("index",
-            flash="Cannot delete built-in presets.", flash_type="error"))
-
+        return redirect(url_for("index", flash="Cannot delete built-in presets.", flash_type="error"))
     label = cfg[mode]["label"]
     del cfg[mode]
     save_config(cfg)
