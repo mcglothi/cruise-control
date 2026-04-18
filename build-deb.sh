@@ -21,10 +21,11 @@ chmod 755 "$BUILDDIR/DEBIAN/postinst" "$BUILDDIR/DEBIAN/prerm"
 
 # App files
 mkdir -p "$BUILDDIR/opt/cruise-control"
-cp "$SCRIPT_DIR/app.py"             "$BUILDDIR/opt/cruise-control/app.py"
-cp "$SCRIPT_DIR/config.example.json" "$BUILDDIR/opt/cruise-control/config.json"
+cp "$SCRIPT_DIR/app.py"               "$BUILDDIR/opt/cruise-control/app.py"
+cp "$SCRIPT_DIR/config.example.json"  "$BUILDDIR/opt/cruise-control/config.json"
 chmod 644 "$BUILDDIR/opt/cruise-control/app.py"
 chmod 644 "$BUILDDIR/opt/cruise-control/config.json"
+[ -f "$SCRIPT_DIR/title.png" ] && cp "$SCRIPT_DIR/title.png" "$BUILDDIR/opt/cruise-control/title.png"
 
 # Systemd service
 mkdir -p "$BUILDDIR/etc/systemd/system"

@@ -7,11 +7,20 @@ Runs as root. Config persisted to config.json alongside this file.
 """
 
 import subprocess, os, json, re, socket, threading, time
-from flask import Flask, request, redirect, url_for, Response, render_template_string
+from flask import Flask, request, redirect, url_for, Response, render_template_string, send_from_directory
 
 IFACE        = os.environ.get("THROTTLE_IFACE", "enP7s7")
 IFB_DEV      = "ifb0"
 SPEEDTEST_URL = os.environ.get("SPEEDTEST_URL", "http://speedtest.tele2.net/100MB.zip")
+
+SPEEDTEST_ENDPOINTS = [
+    ("Tele2 — 100 MB  (EU)",      "http://speedtest.tele2.net/100MB.zip"),
+    ("Tele2 — 1 GB    (EU)",      "http://speedtest.tele2.net/1GB.zip"),
+    ("Hetzner — 100 MB (EU)",     "http://speed.hetzner.de/100MB.bin"),
+    ("Hetzner — 1 GB   (EU)",     "http://speed.hetzner.de/1GB.bin"),
+    ("Hetzner — 10 GB  (EU)",     "http://speed.hetzner.de/10GB.bin"),
+    ("Custom URL",                 "__custom__"),
+]
 CONFIG_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 HOSTNAME     = socket.gethostname()
 BUILTINS     = ["business", "heavy"]
@@ -90,22 +99,23 @@ threading.Thread(target=_stats_collector, daemon=True).start()
 _stest      = {"status": "idle", "speed_bps": 0, "progress": 0, "error": ""}
 _stest_lock = threading.Lock()
 
-def _run_speedtest():
+def _run_speedtest(url=None):
     """
     Download via curl (handles auth/TLS/redirects cleanly) and report speed.
     While curl runs, sample live RX from the stats thread every 500 ms so the
     UI shows a real-time speed number during the test.
     """
+    target = url or SPEEDTEST_URL
     with _stest_lock:
         _stest.update({"status": "running", "speed_bps": 0, "progress": 0, "error": ""})
 
     MAX_SECS = 12
     try:
         proc = subprocess.Popen(
-            ["curl", "-o", "/dev/null", "-s",
+            ["curl", "-o", "/dev/null", "-s", "-L",
              "--max-time", str(MAX_SECS),
              "-w", "%{speed_download}",   # bytes/sec printed to stdout on exit
-             SPEEDTEST_URL],
+             target],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         start = time.monotonic()
@@ -223,10 +233,13 @@ def api_stats():
 @app.route("/api/speedtest/start", methods=["POST"])
 def api_speedtest_start():
     with _stest_lock:
-        status = _stest["status"]
-    if status == "running":
-        return Response(json.dumps({"ok": False, "msg": "Already running"}), mimetype="application/json")
-    threading.Thread(target=_run_speedtest, daemon=True).start()
+        if _stest["status"] == "running":
+            return Response(json.dumps({"ok": False, "msg": "Already running"}), mimetype="application/json")
+    url = request.form.get("url", "").strip() or SPEEDTEST_URL
+    # Reject obviously bad URLs
+    if not url.startswith(("http://", "https://")):
+        return Response(json.dumps({"ok": False, "msg": "Invalid URL"}), mimetype="application/json")
+    threading.Thread(target=_run_speedtest, args=(url,), daemon=True).start()
     return Response(json.dumps({"ok": True}), mimetype="application/json")
 
 @app.route("/api/speedtest/status")
@@ -277,13 +290,10 @@ a { color:var(--blue); }
 /* ── Header ── */
 .header {
   width:100%; max-width:640px;
-  display:flex; align-items:baseline; justify-content:space-between;
+  display:flex; align-items:center; justify-content:space-between;
   margin-bottom:1.5rem;
 }
-.header h1 {
-  font-size:1.5rem; font-weight:700; letter-spacing:-0.02em;
-  color:#fff;
-}
+.title-img { height:72px; width:auto; display:block; }
 .header h1 span { color:var(--blue); }
 .live-dot {
   display:inline-flex; align-items:center; gap:6px;
@@ -382,20 +392,33 @@ a { color:var(--blue); }
 .apply-btn {
   flex:1; padding:0.7rem 1rem;
   border:1px solid var(--border2); border-radius:8px;
+  border-left:3px solid var(--dim);
   background:var(--surface); color:var(--text);
   font-size:0.88rem; font-weight:600;
   cursor:pointer; text-align:left;
-  transition:border-color .15s, background .15s;
+  display:flex; align-items:center; justify-content:space-between;
+  transition:border-color .15s, background .15s, border-left-color .15s;
 }
-.apply-btn:hover { border-color:var(--blue); background:var(--blue-d); }
+.apply-btn:hover {
+  border-color:var(--blue); border-left-color:var(--blue);
+  background:var(--blue-d);
+}
 .apply-btn.is-active {
-  border-color:var(--blue); background:var(--blue-d); color:var(--blue);
+  border-color:var(--blue); border-left-color:var(--blue);
+  background:var(--blue-d); color:var(--blue);
 }
+.apply-btn-text { flex:1; }
 .apply-btn .sub {
   display:block; font-size:0.72rem; font-weight:400;
   font-family:monospace; color:var(--muted); margin-top:2px;
 }
 .apply-btn.is-active .sub { color:var(--blue); opacity:.7; }
+.apply-btn .apply-arrow {
+  font-size:1rem; color:var(--dim); margin-left:0.5rem; flex-shrink:0;
+  transition:color .15s, transform .15s;
+}
+.apply-btn:hover .apply-arrow { color:var(--blue); transform:translateX(2px); }
+.apply-btn.is-active .apply-arrow { color:var(--blue); }
 
 .rate-input {
   width:100px; padding:0.5rem 0.6rem; text-align:right;
@@ -443,8 +466,28 @@ a { color:var(--blue); }
 .hint { font-size:0.68rem; color:var(--dim); margin-top:0.4rem; }
 
 /* ── Speed test ── */
+.st-controls { display:flex; gap:0.5rem; align-items:center; }
+.st-select {
+  flex:1; padding:0.6rem 0.75rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:8px; color:var(--text);
+  font-size:0.85rem; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%235a607a' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 0.75rem center;
+  padding-right:2rem;
+}
+.st-select:focus { outline:none; border-color:var(--blue); }
+.st-select option { background:var(--card); }
+.st-custom {
+  margin-top:0.5rem; width:100%; padding:0.5rem 0.75rem;
+  background:var(--surface); border:1px solid var(--blue);
+  border-radius:6px; color:var(--text); font-size:0.82rem;
+  font-family:monospace;
+}
+.st-custom:focus { outline:none; }
 .st-btn {
-  padding:0.65rem 1.25rem;
+  padding:0.6rem 1.1rem; white-space:nowrap;
   background:var(--surface); border:1px solid var(--border2);
   border-radius:8px; color:var(--text);
   font-size:0.88rem; font-weight:600; cursor:pointer;
@@ -484,7 +527,7 @@ footer {
 <body>
 
 <div class="header">
-  <h1>Cruise <span>Control</span></h1>
+  <img src="/assets/title.png" alt="Cruise Control" class="title-img">
   <span class="live-dot">Live</span>
 </div>
 <p class="subhead">{{ iface }} &nbsp;·&nbsp; {{ hostname }}</p>
@@ -544,7 +587,13 @@ footer {
     Measures this machine's inbound download speed — useful for validating
     that a preset is working as expected.
   </p>
-  <button class="st-btn" id="st-btn" onclick="startSpeedTest()">▶ Run Speed Test</button>
+  <div class="st-controls">
+    <select class="st-select" id="st-select" onchange="onEndpointChange(this)">
+      {{ endpoint_opts | safe }}
+    </select>
+    <button class="st-btn" id="st-btn" onclick="startSpeedTest()">▶ Run</button>
+  </div>
+  <input class="st-custom" id="st-custom" type="text" placeholder="https://your-server.internal/testfile.bin" style="display:none">
   <div class="st-result" id="st-result">
     <div class="st-speed"><span id="st-num">0</span><span class="unit" id="st-unit">Mbps</span></div>
     <div class="st-bar-wrap"><div class="st-bar" id="st-bar"></div></div>
@@ -612,14 +661,25 @@ pollStats();
 // ── Speed test ────────────────────────────────────────────────────────────────
 let stPoll = null;
 
+function onEndpointChange(sel) {
+  const custom = document.getElementById('st-custom');
+  custom.style.display = sel.value === '__custom__' ? 'block' : 'none';
+}
+
 async function startSpeedTest() {
+  let url = document.getElementById('st-select').value;
+  if (url === '__custom__') {
+    url = document.getElementById('st-custom').value.trim();
+    if (!url) { alert('Enter a custom URL first.'); return; }
+  }
   document.getElementById('st-btn').disabled = true;
   document.getElementById('st-error').textContent = '';
   document.getElementById('st-result').style.display = 'block';
   document.getElementById('st-bar').style.width = '0%';
   document.getElementById('st-label').textContent = 'connecting…';
 
-  await fetch('/api/speedtest/start', { method: 'POST' });
+  const body = new URLSearchParams({ url });
+  await fetch('/api/speedtest/start', { method: 'POST', body });
   stPoll = setInterval(pollSpeedtest, 500);
 }
 
@@ -659,7 +719,8 @@ BUILTIN_ROW = """\
 <form method="post" action="/apply" class="mode-row">
   <input type="hidden" name="mode" value="{key}">
   <button type="submit" class="apply-btn{active_cls}">
-    {label}<span class="sub">{rate}</span>
+    <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
+    <span class="apply-arrow">›</span>
   </button>
   <input class="rate-input" type="text" name="rate" value="{rate}" title="tc rate">
   <button type="submit" formaction="/save" class="icon-btn">Save</button>
@@ -669,7 +730,8 @@ CUSTOM_ROW = """\
 <form method="post" action="/apply" class="mode-row">
   <input type="hidden" name="mode" value="{key}">
   <button type="submit" class="apply-btn{active_cls}">
-    {label}<span class="sub">{rate}</span>
+    <span class="apply-btn-text">{label}<span class="sub">{rate}</span></span>
+    <span class="apply-arrow">›</span>
   </button>
   <input class="rate-input" type="text" name="rate" value="{rate}" title="tc rate">
   <button type="submit" formaction="/save" class="icon-btn">Save</button>
@@ -709,12 +771,18 @@ def render_page(flash="", flash_type="ok"):
             + "\n".join(custom_rows)
         )
 
+    endpoint_opts = "".join(
+        f'<option value="{url}">{label}</option>'
+        for label, url in SPEEDTEST_ENDPOINTS
+    )
+
     return render_template_string(PAGE,
         iface=IFACE, hostname=HOSTNAME,
         flash_html=flash_html,
         builtin_rows="\n".join(builtin_rows),
         clear_active=" is-active" if active == "clear" else "",
         custom_section=custom_section,
+        endpoint_opts=endpoint_opts,
     )
 
 
@@ -797,6 +865,11 @@ def delete():
     del cfg[mode]
     save_config(cfg)
     return redirect(url_for("index", flash=f"Deleted preset '{label}'", flash_type="ok"))
+
+
+@app.route("/assets/<path:filename>")
+def assets(filename):
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
 if __name__ == "__main__":
