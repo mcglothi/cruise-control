@@ -22,95 +22,198 @@ You set a rate, hit a button, and the machine stays under that ceiling until you
 
 ---
 
----
-
 ## Requirements
 
 | Requirement | Notes |
 |-------------|-------|
-| Linux, arm64 | Tested on Ubuntu 22.04 / 24.04 on NVIDIA GB10 |
+| Linux, arm64 or x86_64 | Tested on Ubuntu 22.04 / 24.04 on NVIDIA GB10 |
 | Python 3.8+ | Standard on all target systems |
-| `python3-flask` | `apt install python3-flask` |
+| `python3-flask` | Installed automatically by the online installer |
 | `iproute2` | Ships with Ubuntu — provides `tc` and `ip` |
 | `kmod` | For `modprobe ifb` — ships with Ubuntu |
-| Root access | Required for `tc` and `ip link` commands |
+| Root / sudo | Required for `tc` and `ip link` commands |
 
 ---
 
 ## Install
 
-### Option 1 — Debian package (recommended)
+### Option 1 — Online installer (recommended)
 
-Download the latest `.deb` from the [Releases](https://github.com/mcglothi/cruise-control/releases) page and install:
+On any machine with internet access, run:
 
 ```bash
-sudo dpkg -i cruise-control_1.1.0_arm64.deb
+curl -fsSL https://raw.githubusercontent.com/mcglothi/cruise-control/main/install.sh | sudo bash
 ```
 
 The installer will:
-1. Copy the app to `/opt/cruise-control/`
-2. Install the systemd service
-3. Auto-detect your primary network interface
-4. Enable and start the service
+1. Detect your CPU architecture (arm64 or amd64)
+2. Install dependencies via `apt` (`python3-flask`, `iproute2`, `kmod`)
+3. Download the latest `.deb` from GitHub Releases
+4. Auto-detect your primary network interface
+5. Install and start the systemd service
+6. Print the web UI address
 
-The web UI is then available at **`http://<host-ip>:8090`**.
+The web UI is available at **`http://<host-ip>:8090`** immediately after install.
+
+#### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--iface <name>` | auto-detected | Force a specific network interface |
+| `--port <port>` | `8090` | Use a different port for the web UI |
+
+```bash
+# Specify the interface explicitly
+curl -fsSL .../install.sh | sudo bash -s -- --iface enp3s0
+
+# Use a custom port
+curl -fsSL .../install.sh | sudo bash -s -- --port 9000
+```
+
+> **No internet?** Use the offline deb method below.
 
 ---
 
-### Option 2 — deploy script
+### Option 2 — Offline .deb package
 
-For deploying to multiple hosts from a management machine:
+Download the appropriate `.deb` from the [Releases](https://github.com/mcglothi/cruise-control/releases) page:
+
+| File | Platform |
+|------|----------|
+| `cruise-control_<version>_arm64.deb` | NVIDIA GB10, Grace-class (arm64) |
+| `cruise-control_<version>_amd64.deb` | Standard Intel/AMD servers (x86_64) |
+
+Transfer to the target machine and install:
+
+```bash
+# From a management machine
+scp cruise-control_1.1.0_arm64.deb gb10-unit-01:/tmp/
+
+# On the target machine
+sudo dpkg -i /tmp/cruise-control_1.1.0_arm64.deb
+```
+
+If `dpkg` reports missing dependencies, install them first:
+
+```bash
+sudo apt-get install -y python3-flask iproute2 kmod
+sudo dpkg -i /tmp/cruise-control_1.1.0_arm64.deb
+```
+
+---
+
+### Option 3 — Fleet deploy script
+
+For rolling out to multiple hosts from a management machine:
 
 ```bash
 git clone https://github.com/mcglothi/cruise-control.git
 cd cruise-control
-./deploy.sh <hostname>              # auto-detects interface
-./deploy.sh gb10-unit-02 enp3s0    # specify interface explicitly
+
+./deploy.sh gb10-unit-01              # auto-detects interface
+./deploy.sh gb10-unit-02 enp3s0       # specify interface explicitly
 ```
 
-The script uses SSH, so your key must be in the target host's `authorized_keys`.
+Requires SSH key access to each target host. For a full fleet:
+
+```bash
+for host in gb10-01 gb10-02 gb10-03; do
+    ./deploy.sh "$host"
+done
+```
+
+Each host maintains its own `config.json` — presets are per-host and not shared.
 
 ---
 
-### Option 3 — manual
+### Option 4 — Manual install
 
 ```bash
 sudo mkdir -p /opt/cruise-control
 sudo cp app.py /opt/cruise-control/
 sudo cp config.example.json /opt/cruise-control/config.json
 sudo cp cruise-control.service /etc/systemd/system/
+```
 
-# Set the correct interface name
+Edit the service file to set your interface:
+
+```bash
 sudo nano /etc/systemd/system/cruise-control.service
-# → edit THROTTLE_IFACE=<your-interface>
+# → set THROTTLE_IFACE=<your-interface>
+```
 
+Enable and start:
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now cruise-control
 ```
 
 ---
 
-## Finding the right interface name
+## Finding your interface name
 
 The service needs to know which interface to shape. To find it:
 
 ```bash
 ip route | grep default
-# example: default via 10.0.0.1 dev enp3s0 proto dhcp
+# example: default via 10.0.0.1 dev enP7s7 proto dhcp
 #                                    ^^^^^^
 ```
 
-Or look for the interface that is `state UP` and has a 10G link:
+Or look for the interface that is `state UP` with a 10G link:
 
 ```bash
 ip link show
 ```
 
-Update `THROTTLE_IFACE` in `/etc/systemd/system/cruise-control.service`, then:
+The online installer and deb `postinst` script auto-detect this. To change it after install:
 
 ```bash
+sudo nano /etc/systemd/system/cruise-control.service
+# → edit: Environment=THROTTLE_IFACE=<your-interface>
 sudo systemctl daemon-reload && sudo systemctl restart cruise-control
 ```
+
+---
+
+## Upgrading
+
+### From the online installer
+
+Re-run the installer — it will download and install the latest release over the existing one. Your `config.json` is preserved (it is marked as a `dpkg` conffile and will not be overwritten).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mcglothi/cruise-control/main/install.sh | sudo bash
+```
+
+### From a .deb
+
+Download the new `.deb` and install it with `dpkg -i`. The `--force-confold` flag keeps your existing config:
+
+```bash
+sudo dpkg -i cruise-control_<new-version>_arm64.deb
+```
+
+---
+
+## Uninstall
+
+```bash
+# Via dpkg (removes the package, preserves config.json in /opt/cruise-control/)
+sudo dpkg -r cruise-control
+
+# Full removal including config
+sudo dpkg --purge cruise-control
+sudo rm -rf /opt/cruise-control
+
+# If installed manually (not via deb)
+sudo systemctl disable --now cruise-control
+sudo rm -rf /opt/cruise-control /etc/systemd/system/cruise-control.service
+sudo systemctl daemon-reload
+```
+
+Uninstalling stops the service and runs `tc` cleanup — no stale rate limits are left behind.
 
 ---
 
@@ -120,52 +223,56 @@ Open **`http://<host-ip>:8090`** in any browser on the same network.
 
 ### Live stats
 
-The top panel shows live inbound and outbound speeds, updated every second directly from the kernel's interface counters. The bar below the numbers fills relative to the active limit — so at 1 Gbps with a 1 Gbps preset active, the bar is full when the link is saturated.
+The top panel shows live inbound and outbound speeds, updated every second directly from the kernel's interface counters. A context line shows the current limit and link speed (e.g., `500 Mbps limit / 10 Gbps link`). The bar below fills relative to the active limit, so at 1 Gbps with a 1 Gbps preset active, the bar is full when the link is saturated.
 
-### Built-in presets
+### Presets
 
-| Preset | Default rate | Intended use |
-|--------|-------------|--------------|
-| Business Hours | 1 Gbps | Throttled but usable — model pulls don't saturate shared links |
-| Heavy Throttle | 200 Mbps | High-demand windows, all-hands meetings |
+Each preset row has a **slider + number + unit selector** (Kbps / Mbps / Gbps). Adjust the rate, then:
+
+- Click the **preset name** to apply it immediately at the current slider value
+- Click **Save** to update the stored default without changing what is currently active
+
+| Built-in preset | Default rate | Intended use |
+|----------------|-------------|--------------|
+| Business Hours | 1 Gbps | Throttled but usable |
+| Heavy Throttle | 200 Mbps | High-demand windows, all-hands |
 | Unrestricted | no limit | Full 10G, removes all tc rules |
-
-Click the preset name to apply it immediately. Edit the rate field and click **Apply** to change the rate and apply in one step. Click **Save** to update the stored default without changing what's currently active.
 
 ### Custom presets
 
-Use the **Add Custom Preset** form to create named presets for specific events:
+Use the **Add Custom Preset** form to create named presets:
 
-- `All Hands Meeting` → `100mbit`
-- `Training Day` → `500mbit`
-- `Overnight Batch` → `2gbit`
+- `All Hands Meeting` → 100 Mbps
+- `Training Day` → 500 Mbps
+- `Overnight Batch` → 2 Gbps
 
-Custom presets can be deleted; built-in presets cannot.
-
-Valid rate formats: `100mbit`, `500mbit`, `1gbit`, `2.5gbit`, `500kbit`, etc.
+Custom presets can be deleted. Built-in presets cannot.
 
 ### Speed test
 
-The built-in speed test downloads a 100 MB file and reports the average download speed. Use it to confirm a preset is working:
+The built-in speed test downloads a test file and reports the average download speed. Use it to confirm a preset is working:
 
 1. Note the current unrestricted speed
 2. Apply a preset
 3. Run the speed test — the result should be at or below the preset rate
 
-The default test server is `speedtest.tele2.net`. To use an internal file server instead (useful when GB10 units don't have internet access), set `SPEEDTEST_URL` in the service unit:
+Choose from several pre-configured endpoints (Tele2, Hetzner) or supply a custom internal URL. To set a default internal test server:
 
 ```ini
+# /etc/systemd/system/cruise-control.service
 [Service]
 Environment=SPEEDTEST_URL=http://your-fileserver.internal/testfile.bin
 ```
 
-Then `sudo systemctl daemon-reload && sudo systemctl restart cruise-control`.
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart cruise-control
+```
 
 ---
 
 ## Configuration
 
-Config is stored at `/opt/cruise-control/config.json`. It is written by the web UI and survives service restarts. You can also edit it directly — changes take effect the next time a preset is applied.
+Config is stored at `/opt/cruise-control/config.json`. It is written by the web UI and survives service restarts and upgrades. You can also edit it directly — changes take effect the next time a preset is applied.
 
 ```json
 {
@@ -187,7 +294,7 @@ Config is stored at `/opt/cruise-control/config.json`. It is written by the web 
 }
 ```
 
-`builtin: true` presets cannot be deleted from the UI. The `rate` field uses standard `tc` rate syntax.
+`builtin: true` presets cannot be deleted from the UI. The `rate` field uses standard `tc` rate syntax (`kbit`, `mbit`, `gbit`).
 
 ### Environment variables
 
@@ -196,7 +303,25 @@ Set these in `/etc/systemd/system/cruise-control.service` under `[Service]`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `THROTTLE_IFACE` | `enP7s7` | Network interface to shape |
-| `SPEEDTEST_URL` | `http://speedtest.tele2.net/100MB.zip` | File to download for speed test |
+| `SPEEDTEST_URL` | `http://speedtest.tele2.net/100MB.zip` | Default speed test file |
+
+---
+
+## Service management
+
+```bash
+# Status
+sudo systemctl status cruise-control
+
+# Restart (e.g. after editing the service file)
+sudo systemctl restart cruise-control
+
+# View live logs
+sudo journalctl -u cruise-control -f
+
+# Stop (also clears any active tc rules)
+sudo systemctl stop cruise-control
+```
 
 ---
 
@@ -231,7 +356,7 @@ The service's `ExecStop` clause ensures tc rules are always cleaned up when the 
 
 ---
 
-## Building the deb
+## Building the .deb
 
 Build on an arm64 machine (any GB10 works):
 
@@ -242,53 +367,7 @@ cd cruise-control
 # → cruise-control_1.1.0_arm64.deb
 ```
 
-To bump the version, edit `packaging/DEBIAN/control` before building.
-
----
-
-## Deploying to multiple hosts
-
-The `deploy.sh` script handles the full install on any reachable host:
-
-```bash
-./deploy.sh gb10-unit-01            # auto-detects interface
-./deploy.sh gb10-unit-02 enp3s0     # explicit interface
-./deploy.sh gb10-unit-03 enp1s0f0   # 10G NIC name on that host
-```
-
-For a fleet rollout, loop over your hosts:
-
-```bash
-for host in gb10-01 gb10-02 gb10-03; do
-    ./deploy.sh $host
-done
-```
-
-Each host gets its own `config.json` — presets are per-host and not shared.
-
----
-
-## Service management
-
-```bash
-# Status
-sudo systemctl status cruise-control
-
-# Restart (e.g. after editing the service file)
-sudo systemctl restart cruise-control
-
-# View logs
-sudo journalctl -u cruise-control -f
-
-# Stop (also clears any active tc rules)
-sudo systemctl stop cruise-control
-
-# Uninstall
-sudo dpkg -r cruise-control         # if installed via deb
-# or
-sudo systemctl disable --now cruise-control
-sudo rm -rf /opt/cruise-control /etc/systemd/system/cruise-control.service
-```
+To bump the version, edit `packaging/DEBIAN/control` before building. To build an amd64 package, change `Architecture: amd64` in that same file.
 
 ---
 
@@ -297,7 +376,7 @@ sudo rm -rf /opt/cruise-control /etc/systemd/system/cruise-control.service
 - NVIDIA GB10 (Grace Blackwell Superchip), Ubuntu 24.04, arm64
 - Kernel 6.17 with `ifb` module available
 
-Should work on any arm64 or x86\_64 Debian/Ubuntu system with a 5.x+ kernel. For x86\_64, rebuild the deb with `Architecture: amd64` in `packaging/DEBIAN/control`.
+Should work on any arm64 or x86\_64 Debian/Ubuntu system with a 5.x+ kernel.
 
 ---
 
