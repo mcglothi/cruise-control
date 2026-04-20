@@ -6,20 +6,34 @@ Serves a live web GUI on port 8090.
 Runs as root. Config persisted to config.json alongside this file.
 """
 
-import subprocess, os, json, re, socket, threading, time
+import subprocess, os, json, re, socket, threading, time, math
+import urllib.request as _urllib_req
 from flask import Flask, request, redirect, url_for, Response, render_template_string, send_from_directory
 
 IFACE        = os.environ.get("THROTTLE_IFACE", "enP7s7")
 IFB_DEV      = "ifb0"
-SPEEDTEST_URL = os.environ.get("SPEEDTEST_URL", "http://speedtest.tele2.net/100MB.zip")
+SPEEDTEST_URL = os.environ.get("SPEEDTEST_URL", "http://speed.hetzner.de/100MB.bin")
 
-SPEEDTEST_ENDPOINTS = [
-    ("Tele2 — 100 MB  (EU)",      "http://speedtest.tele2.net/100MB.zip"),
-    ("Tele2 — 1 GB    (EU)",      "http://speedtest.tele2.net/1GB.zip"),
-    ("Hetzner — 100 MB (EU)",     "http://speed.hetzner.de/100MB.bin"),
-    ("Hetzner — 1 GB   (EU)",     "http://speed.hetzner.de/1GB.bin"),
-    ("Hetzner — 10 GB  (EU)",     "http://speed.hetzner.de/10GB.bin"),
-    ("Custom URL",                 "__custom__"),
+# Geo-tagged server catalog — sorted by distance at runtime via /api/speedtest/servers
+SPEEDTEST_SERVER_CATALOG = [
+    # North America — East
+    {"label": "Linode — 100 MB (Newark, US)",       "url": "http://speedtest.newark.linode.com/100MB-newark.bin",        "lat": 40.74, "lon": -74.17},
+    {"label": "Linode — 100 MB (Toronto, CA)",      "url": "http://speedtest.toronto1.linode.com/100MB-toronto.bin",     "lat": 43.65, "lon": -79.38},
+    # North America — Central
+    {"label": "Linode — 100 MB (Dallas, US)",       "url": "http://speedtest.dallas.linode.com/100MB-dallas.bin",        "lat": 32.78, "lon": -96.80},
+    # North America — West
+    {"label": "Linode — 100 MB (Fremont, US)",      "url": "http://speedtest.fremont.linode.com/100MB-fremont.bin",      "lat": 37.55, "lon": -121.99},
+    # Europe
+    {"label": "Hetzner — 100 MB (Nuremberg, DE)",   "url": "http://speed.hetzner.de/100MB.bin",                         "lat": 49.45, "lon": 11.08},
+    {"label": "Hetzner — 1 GB (Nuremberg, DE)",     "url": "http://speed.hetzner.de/1GB.bin",                           "lat": 49.45, "lon": 11.08},
+    {"label": "Hetzner — 10 GB (Nuremberg, DE)",    "url": "http://speed.hetzner.de/10GB.bin",                          "lat": 49.45, "lon": 11.08},
+    {"label": "Tele2 — 100 MB (Stockholm, SE)",     "url": "http://speedtest.tele2.net/100MB.zip",                      "lat": 59.33, "lon": 18.07},
+    {"label": "Tele2 — 1 GB (Stockholm, SE)",       "url": "http://speedtest.tele2.net/1GB.zip",                        "lat": 59.33, "lon": 18.07},
+    {"label": "Linode — 100 MB (London, UK)",       "url": "http://speedtest.london.linode.com/100MB-london.bin",       "lat": 51.51, "lon": -0.12},
+    {"label": "Linode — 100 MB (Frankfurt, DE)",    "url": "http://speedtest.frankfurt.linode.com/100MB-frankfurt.bin", "lat": 50.11, "lon":  8.68},
+    # Asia Pacific
+    {"label": "Linode — 100 MB (Singapore)",        "url": "http://speedtest.singapore.linode.com/100MB-singapore.bin", "lat":  1.35, "lon": 103.82},
+    {"label": "Linode — 100 MB (Tokyo, JP)",        "url": "http://speedtest.tokyo2.linode.com/100MB-tokyo.bin",        "lat": 35.69, "lon": 139.69},
 ]
 CONFIG_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 HOSTNAME     = socket.gethostname()
@@ -32,6 +46,16 @@ RATE_RE = re.compile(r"^\d+(\.\d+)?\s*(kbit|mbit|gbit|kbps|mbps|gbps)$", re.IGNO
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 app = Flask(__name__)
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km between two lat/lon points."""
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.asin(math.sqrt(min(1.0, a)))
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -130,7 +154,9 @@ def _run_speedtest(url=None):
                 _stest.update({"speed_bps": live_rx, "progress": progress})
 
         stdout, _ = proc.communicate()
-        if proc.returncode == 0:
+        # rc=0 → completed; rc=28 → max-time hit on a partial download.
+        # curl still writes %{speed_download} to stdout in both cases.
+        if proc.returncode in (0, 28):
             bytes_per_sec = float(stdout.decode().strip() or "0")
             with _stest_lock:
                 _stest.update({
@@ -247,6 +273,37 @@ def api_speedtest_status():
     with _stest_lock:
         data = dict(_stest)
     return Response(json.dumps(data), mimetype="application/json")
+
+@app.route("/api/speedtest/servers")
+def api_speedtest_servers():
+    """Return the server catalog sorted by distance from this machine's public IP location."""
+    lat = lon = None
+    location = None
+    try:
+        with _urllib_req.urlopen(
+            "http://ip-api.com/json/?fields=lat,lon,city,country", timeout=5
+        ) as resp:
+            geo = json.loads(resp.read().decode())
+        lat, lon = float(geo["lat"]), float(geo["lon"])
+        location = ", ".join(filter(None, [geo.get("city"), geo.get("country")]))
+    except Exception:
+        pass
+
+    servers = []
+    for s in SPEEDTEST_SERVER_CATALOG:
+        if lat is not None:
+            dist = round(_haversine(lat, lon, s["lat"], s["lon"]))
+        else:
+            dist = None
+        servers.append({"label": s["label"], "url": s["url"], "distance_km": dist})
+
+    if lat is not None:
+        servers.sort(key=lambda x: x["distance_km"])
+
+    return Response(
+        json.dumps({"servers": servers, "location": location}),
+        mimetype="application/json",
+    )
 
 
 # ── Page ──────────────────────────────────────────────────────────────────────
@@ -548,6 +605,19 @@ a { color:var(--blue); }
   font-family:monospace; color:var(--muted);
 }
 .st-error { color:var(--red); font-size:0.82rem; margin-top:0.5rem; }
+.st-geo-btn {
+  padding:0.6rem 0.8rem; white-space:nowrap; flex-shrink:0;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:8px; color:var(--muted);
+  font-size:0.82rem; font-weight:600; cursor:pointer;
+  transition:border-color .15s, color .15s;
+}
+.st-geo-btn:hover:not(:disabled) { border-color:var(--blue); color:var(--blue); }
+.st-geo-btn:disabled { opacity:.4; cursor:not-allowed; }
+.st-geo-status {
+  margin-top:0.4rem; font-size:0.72rem;
+  font-family:monospace; color:var(--muted);
+}
 
 .divider { border:none; border-top:1px solid var(--border); margin:0.25rem 0; }
 footer {
@@ -639,8 +709,10 @@ footer {
     <select class="st-select" id="st-select" onchange="onEndpointChange(this)">
       {{ endpoint_opts | safe }}
     </select>
+    <button class="st-geo-btn" id="st-geo-btn" onclick="findNearestServers()" title="Auto-detect nearest servers">⊕ Nearest</button>
     <button class="st-btn" id="st-btn" onclick="startSpeedTest()">▶ Run</button>
   </div>
+  <div class="st-geo-status" id="st-geo-status" style="display:none"></div>
   <input class="st-custom" id="st-custom" type="text" placeholder="https://your-server.internal/testfile.bin" style="display:none">
   <div class="st-result" id="st-result">
     <div class="st-speed"><span id="st-num">0</span><span class="unit" id="st-unit">Mbps</span></div>
@@ -812,6 +884,45 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.rate-ctl').forEach(initRateControl);
 });
 
+async function findNearestServers() {
+  const btn    = document.getElementById('st-geo-btn');
+  const status = document.getElementById('st-geo-status');
+  btn.disabled = true;
+  btn.textContent = '⊕ Locating…';
+  status.style.display = 'none';
+
+  try {
+    const r = await fetch('/api/speedtest/servers');
+    const d = await r.json();
+
+    const sel = document.getElementById('st-select');
+    sel.innerHTML = '';
+    d.servers.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.url;
+      opt.textContent = s.label + (s.distance_km != null ? ' — ' + s.distance_km.toLocaleString() + ' km' : '');
+      sel.appendChild(opt);
+    });
+    const custom = document.createElement('option');
+    custom.value = '__custom__';
+    custom.textContent = 'Custom URL';
+    sel.appendChild(custom);
+
+    onEndpointChange(sel);
+
+    if (d.location) {
+      status.textContent = 'Sorted by distance from ' + d.location;
+      status.style.display = 'block';
+    }
+    btn.textContent = '✓ Nearest';
+  } catch(e) {
+    status.textContent = 'Could not detect location — showing full list';
+    status.style.display = 'block';
+    btn.textContent = '⊕ Nearest';
+  }
+  btn.disabled = false;
+}
+
 async function pollSpeedtest() {
   try {
     const r = await fetch('/api/speedtest/status');
@@ -939,9 +1050,9 @@ def render_page(flash="", flash_type="ok"):
         )
 
     endpoint_opts = "".join(
-        f'<option value="{url}">{label}</option>'
-        for label, url in SPEEDTEST_ENDPOINTS
-    )
+        f'<option value="{s["url"]}">{s["label"]}</option>'
+        for s in SPEEDTEST_SERVER_CATALOG
+    ) + '<option value="__custom__">Custom URL</option>'
 
     return render_template_string(PAGE,
         iface=IFACE, hostname=HOSTNAME,
