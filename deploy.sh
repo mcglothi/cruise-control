@@ -22,7 +22,7 @@ if [[ -z "$IFACE" ]]; then
 fi
 
 # 3. Install systemd service
-scp gb10-throttle.service "$HOST":/tmp/cruise-control.service
+scp cruise-control.service "$HOST":/tmp/cruise-control.service
 ssh "$HOST" "
   sudo sed -i 's|ExecStart=.*|ExecStart=/usr/bin/python3 /opt/cruise-control/app.py|' /tmp/cruise-control.service
   sudo sed -i 's|WorkingDirectory=.*|WorkingDirectory=/opt/cruise-control|' /tmp/cruise-control.service
