@@ -249,6 +249,8 @@ def _get_schedules(cfg):
     return cfg.get("schedules", [])
 
 def _schedule_matches_now(sched):
+    if sched.get("always"):
+        return True
     now     = datetime.datetime.now()
     weekday = now.weekday()          # 0=Mon … 6=Sun
     if weekday not in sched.get("days", []):
@@ -370,14 +372,17 @@ def api_schedules():
 
 @app.route("/api/schedules/add", methods=["POST"])
 def api_schedule_add():
-    data = request.get_json(force=True) or {}
+    data   = request.get_json(force=True) or {}
     preset = data.get("preset", "")
+    always = bool(data.get("always", False))
     days   = data.get("days", [])
     start  = data.get("start", "")
     end    = data.get("end", "")
-    if not preset or not days or not start or not end:
+    if not preset:
         return Response(json.dumps({"ok": False, "msg": "Missing fields"}), mimetype="application/json")
-    if start >= end:
+    if not always and (not days or not start or not end):
+        return Response(json.dumps({"ok": False, "msg": "Missing fields"}), mimetype="application/json")
+    if not always and start >= end:
         return Response(json.dumps({"ok": False, "msg": "Start must be before end"}), mimetype="application/json")
     cfg = load_config()
     if preset not in cfg or "rate" not in cfg.get(preset, {}):
@@ -385,11 +390,14 @@ def api_schedule_add():
     sched = {
         "id":      f"s{int(time.time() * 1000)}",
         "preset":  preset,
-        "days":    sorted(int(d) for d in days),
-        "start":   start,
-        "end":     end,
         "enabled": True,
     }
+    if always:
+        sched["always"] = True
+    else:
+        sched["days"]  = sorted(int(d) for d in days)
+        sched["start"] = start
+        sched["end"]   = end
     schedules = _get_schedules(cfg)
     schedules.append(sched)
     cfg["schedules"] = schedules
@@ -425,6 +433,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cruise Control</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2308090d'/><path d='M5 24 A12 12 0 0 1 27 24' stroke='%234d9fff' stroke-width='2.5' fill='none' stroke-linecap='round'/><line x1='16' y1='24' x2='24' y2='12' stroke='%23f0b429' stroke-width='2.2' stroke-linecap='round'/><circle cx='16' cy='24' r='2.5' fill='%234d9fff'/></svg>">
 <style>
 :root {
   --bg:      #08090d;
@@ -803,6 +812,20 @@ a { color:var(--blue); }
 .sched-empty {
   font-size:0.8rem; color:var(--muted); padding:0.5rem 0;
 }
+.sched-mode-btn {
+  padding:0.32rem 0.75rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--muted);
+  font-size:0.78rem; font-weight:600; cursor:pointer;
+  transition:border-color .12s, color .12s, background .12s;
+}
+.sched-mode-btn:hover { border-color:var(--blue); color:var(--blue); }
+.sched-mode-btn.on    { border-color:var(--blue); color:var(--blue); background:var(--blue-d); }
+.sched-always-badge {
+  font-size:0.72rem; font-weight:700; padding:0.15rem 0.5rem;
+  border-radius:4px; background:var(--green-d); color:var(--green);
+  white-space:nowrap; letter-spacing:0.04em;
+}
 
 .divider { border:none; border-top:1px solid var(--border); margin:0.25rem 0; }
 footer {
@@ -919,22 +942,33 @@ footer {
   <hr class="divider" style="margin:0.75rem 0">
   <div class="section-label">Add Schedule</div>
 
-  <div class="sched-day-picker" id="sched-day-picker">
-    <button type="button" class="sched-day-chip" data-day="0">Mo</button>
-    <button type="button" class="sched-day-chip" data-day="1">Tu</button>
-    <button type="button" class="sched-day-chip" data-day="2">We</button>
-    <button type="button" class="sched-day-chip" data-day="3">Th</button>
-    <button type="button" class="sched-day-chip" data-day="4">Fr</button>
-    <button type="button" class="sched-day-chip" data-day="5">Sa</button>
-    <button type="button" class="sched-day-chip" data-day="6">Su</button>
-    <button type="button" class="sched-day-chip" id="sched-wkday-btn" data-group="weekdays" style="border-style:dashed">M–F</button>
-    <button type="button" class="sched-day-chip" id="sched-wkend-btn" data-group="weekend" style="border-style:dashed">Sa–Su</button>
+  <!-- Mode toggle -->
+  <div style="display:flex;gap:0.4rem;margin-bottom:0.65rem">
+    <button type="button" class="sched-mode-btn on" id="sched-mode-timed"  onclick="setSchedMode('timed')">Scheduled</button>
+    <button type="button" class="sched-mode-btn"    id="sched-mode-always" onclick="setSchedMode('always')">24/7 Always On</button>
   </div>
 
-  <div class="sched-time-row">
-    <input type="time" id="sched-start" class="sched-time-input" value="09:00">
-    <span style="color:var(--muted);font-size:0.9rem">–</span>
-    <input type="time" id="sched-end" class="sched-time-input" value="17:00">
+  <!-- Timed pickers (hidden when 24/7) -->
+  <div id="sched-timed-section">
+    <div class="sched-day-picker" id="sched-day-picker">
+      <button type="button" class="sched-day-chip" data-day="0">Mo</button>
+      <button type="button" class="sched-day-chip" data-day="1">Tu</button>
+      <button type="button" class="sched-day-chip" data-day="2">We</button>
+      <button type="button" class="sched-day-chip" data-day="3">Th</button>
+      <button type="button" class="sched-day-chip" data-day="4">Fr</button>
+      <button type="button" class="sched-day-chip" data-day="5">Sa</button>
+      <button type="button" class="sched-day-chip" data-day="6">Su</button>
+      <button type="button" class="sched-day-chip" id="sched-wkday-btn" style="border-style:dashed">M–F</button>
+      <button type="button" class="sched-day-chip" id="sched-wkend-btn" style="border-style:dashed">Sa–Su</button>
+    </div>
+    <div class="sched-time-row">
+      <input type="time" id="sched-start" class="sched-time-input" value="09:00">
+      <span style="color:var(--muted);font-size:0.9rem">–</span>
+      <input type="time" id="sched-end" class="sched-time-input" value="17:00">
+    </div>
+  </div>
+
+  <div class="sched-time-row" style="margin-top:0">
     <select id="sched-preset" class="sched-preset-select">
       <!-- populated by JS from PRESETS -->
     </select>
@@ -1028,6 +1062,16 @@ async function startSpeedTest() {
 const PRESETS = {{ presets_json | safe }};
 const DAY_NAMES = ['Mo','Tu','We','Th','Fr','Sa','Su'];
 
+let _schedMode = 'timed';
+
+function setSchedMode(mode) {
+  _schedMode = mode;
+  document.getElementById('sched-mode-timed').classList.toggle('on',  mode === 'timed');
+  document.getElementById('sched-mode-always').classList.toggle('on', mode === 'always');
+  document.getElementById('sched-timed-section').style.display = mode === 'timed' ? '' : 'none';
+  schedErr('');
+}
+
 (function initSchedulerForm() {
   // Populate preset select
   const sel = document.getElementById('sched-preset');
@@ -1060,26 +1104,31 @@ function schedErr(msg) {
 }
 
 async function addSchedule() {
-  const days = Array.from(document.querySelectorAll('#sched-day-picker [data-day].on'))
-                    .map(c => +c.dataset.day);
-  const start  = document.getElementById('sched-start').value;
-  const end    = document.getElementById('sched-end').value;
   const preset = document.getElementById('sched-preset').value;
-
-  if (!days.length)   { schedErr('Select at least one day.'); return; }
-  if (!start || !end) { schedErr('Enter start and end times.'); return; }
-  if (start >= end)   { schedErr('Start must be before end.'); return; }
-  if (!preset)        { schedErr('Select a preset.'); return; }
+  if (!preset) { schedErr('Select a preset.'); return; }
   schedErr('');
+
+  let body;
+  if (_schedMode === 'always') {
+    body = { preset, always: true };
+  } else {
+    const days = Array.from(document.querySelectorAll('#sched-day-picker [data-day].on'))
+                      .map(c => +c.dataset.day);
+    const start = document.getElementById('sched-start').value;
+    const end   = document.getElementById('sched-end').value;
+    if (!days.length)   { schedErr('Select at least one day.'); return; }
+    if (!start || !end) { schedErr('Enter start and end times.'); return; }
+    if (start >= end)   { schedErr('Start must be before end.'); return; }
+    body = { preset, days, start, end };
+  }
 
   const r = await fetch('/api/schedules/add', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ days, start, end, preset }),
+    body: JSON.stringify(body),
   });
   const d = await r.json();
   if (d.ok) {
-    // Reset day chips
     document.querySelectorAll('#sched-day-picker [data-day]').forEach(c => c.classList.remove('on'));
     loadSchedules();
   } else {
@@ -1098,18 +1147,28 @@ async function toggleSchedule(id) {
 }
 
 function renderScheduleRow(s, activeId) {
-  const isActive = s.id === activeId;
-  const dayBadges = DAY_NAMES.map((n, i) =>
-    `<span class="sched-day-badge${s.days.includes(i) ? ' on' : ''}">${n}</span>`
-  ).join('');
+  const isActive    = s.id === activeId;
   const presetLabel = PRESETS[s.preset] || s.preset;
-  const activeTag = isActive ? '<span class="sched-active-dot">active now</span>' : '';
+  const activeTag   = isActive ? '<span class="sched-active-dot">active now</span>' : '';
   const enabledLabel = s.enabled ? 'Pause' : 'Resume';
+
+  let leftCol;
+  if (s.always) {
+    leftCol = '<span class="sched-always-badge">24 / 7</span>';
+  } else {
+    const dayBadges = DAY_NAMES.map((n, i) =>
+      `<span class="sched-day-badge${s.days.includes(i) ? ' on' : ''}">${n}</span>`
+    ).join('');
+    leftCol = `<div class="sched-days-badges">${dayBadges}</div>`;
+  }
+
+  const timeLabel = s.always ? '' : `<span class="sched-time-label">${s.start} – ${s.end}</span>`;
+
   return `
     <div class="sched-row${isActive ? ' active-now' : ''}${!s.enabled ? ' disabled' : ''}">
-      <div class="sched-days-badges">${dayBadges}</div>
+      ${leftCol}
       <div class="sched-meta">
-        <span class="sched-time-label">${s.start} – ${s.end}</span>
+        ${timeLabel}
         <span class="sched-preset-label">${presetLabel}</span>
         ${activeTag}
       </div>
