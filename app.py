@@ -6,7 +6,7 @@ Serves a live web GUI on port 8090.
 Runs as root. Config persisted to config.json alongside this file.
 """
 
-import subprocess, os, json, re, socket, threading, time, math
+import subprocess, os, json, re, socket, threading, time, math, datetime
 import urllib.request as _urllib_req
 from flask import Flask, request, redirect, url_for, Response, render_template_string, send_from_directory
 
@@ -240,6 +240,58 @@ def get_status(cfg):
     return active, tc_raw, limit_bps
 
 
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+
+_sched_lock      = threading.Lock()
+_sched_active_id = None   # id of the schedule currently being enforced, or None
+
+def _get_schedules(cfg):
+    return cfg.get("schedules", [])
+
+def _schedule_matches_now(sched):
+    now     = datetime.datetime.now()
+    weekday = now.weekday()          # 0=Mon … 6=Sun
+    if weekday not in sched.get("days", []):
+        return False
+    current = now.strftime("%H:%M")
+    return sched["start"] <= current < sched["end"]
+
+def _scheduler_tick():
+    global _sched_active_id
+    cfg       = load_config()
+    schedules = [s for s in _get_schedules(cfg) if s.get("enabled", True)]
+
+    matched = next((s for s in schedules if _schedule_matches_now(s)), None)
+
+    with _sched_lock:
+        prev_id = _sched_active_id
+        new_id  = matched["id"] if matched else None
+
+    if new_id == prev_id:
+        return  # nothing changed
+
+    if matched:
+        preset_key = matched.get("preset", "")
+        if preset_key in cfg and "rate" in cfg[preset_key]:
+            apply_ingress_limit(cfg[preset_key]["rate"])
+    else:
+        # A scheduler-managed window just ended — revert to unrestricted
+        clear_all()
+
+    with _sched_lock:
+        _sched_active_id = new_id
+
+def _scheduler_loop():
+    while True:
+        try:
+            _scheduler_tick()
+        except Exception:
+            pass
+        time.sleep(30)
+
+threading.Thread(target=_scheduler_loop, daemon=True).start()
+
+
 # ── API routes ────────────────────────────────────────────────────────────────
 
 @app.route("/api/stats")
@@ -304,6 +356,65 @@ def api_speedtest_servers():
         json.dumps({"servers": servers, "location": location}),
         mimetype="application/json",
     )
+
+
+@app.route("/api/schedules")
+def api_schedules():
+    cfg = load_config()
+    with _sched_lock:
+        active_id = _sched_active_id
+    return Response(
+        json.dumps({"schedules": _get_schedules(cfg), "active_id": active_id}),
+        mimetype="application/json",
+    )
+
+@app.route("/api/schedules/add", methods=["POST"])
+def api_schedule_add():
+    data = request.get_json(force=True) or {}
+    preset = data.get("preset", "")
+    days   = data.get("days", [])
+    start  = data.get("start", "")
+    end    = data.get("end", "")
+    if not preset or not days or not start or not end:
+        return Response(json.dumps({"ok": False, "msg": "Missing fields"}), mimetype="application/json")
+    if start >= end:
+        return Response(json.dumps({"ok": False, "msg": "Start must be before end"}), mimetype="application/json")
+    cfg = load_config()
+    if preset not in cfg or "rate" not in cfg.get(preset, {}):
+        return Response(json.dumps({"ok": False, "msg": "Unknown preset"}), mimetype="application/json")
+    sched = {
+        "id":      f"s{int(time.time() * 1000)}",
+        "preset":  preset,
+        "days":    sorted(int(d) for d in days),
+        "start":   start,
+        "end":     end,
+        "enabled": True,
+    }
+    schedules = _get_schedules(cfg)
+    schedules.append(sched)
+    cfg["schedules"] = schedules
+    save_config(cfg)
+    return Response(json.dumps({"ok": True, "schedule": sched}), mimetype="application/json")
+
+@app.route("/api/schedules/<sid>/delete", methods=["POST"])
+def api_schedule_delete(sid):
+    cfg       = load_config()
+    schedules = [s for s in _get_schedules(cfg) if s["id"] != sid]
+    cfg["schedules"] = schedules
+    save_config(cfg)
+    return Response(json.dumps({"ok": True}), mimetype="application/json")
+
+@app.route("/api/schedules/<sid>/toggle", methods=["POST"])
+def api_schedule_toggle(sid):
+    cfg       = load_config()
+    schedules = _get_schedules(cfg)
+    for s in schedules:
+        if s["id"] == sid:
+            s["enabled"] = not s.get("enabled", True)
+            break
+    cfg["schedules"] = schedules
+    save_config(cfg)
+    return Response(json.dumps({"ok": True}), mimetype="application/json")
 
 
 # ── Page ──────────────────────────────────────────────────────────────────────
@@ -619,6 +730,80 @@ a { color:var(--blue); }
   font-family:monospace; color:var(--muted);
 }
 
+/* ── Scheduler ── */
+.sched-day-picker {
+  display:flex; gap:0.3rem; flex-wrap:wrap; margin-bottom:0.6rem;
+}
+.sched-day-chip {
+  padding:0.28rem 0.45rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:5px; color:var(--muted);
+  font-size:0.74rem; font-weight:600; font-family:monospace;
+  cursor:pointer; line-height:1; user-select:none;
+  transition:border-color .12s, color .12s, background .12s;
+}
+.sched-day-chip:hover    { border-color:var(--blue); color:var(--blue); }
+.sched-day-chip.on       { border-color:var(--blue); color:var(--blue); background:var(--blue-d); }
+.sched-time-row {
+  display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:0.6rem;
+}
+.sched-time-input {
+  padding:0.5rem 0.5rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--text);
+  font-size:0.85rem; font-family:monospace;
+  color-scheme:dark;
+}
+.sched-time-input:focus { outline:none; border-color:var(--blue); }
+.sched-preset-select {
+  flex:1; padding:0.5rem 0.75rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:6px; color:var(--text); font-size:0.85rem; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+}
+.sched-preset-select:focus { outline:none; border-color:var(--blue); }
+.sched-row {
+  display:flex; align-items:center; gap:0.6rem;
+  padding:0.6rem 0.75rem; margin-bottom:0.4rem;
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:8px; flex-wrap:wrap;
+  transition:border-color .15s;
+}
+.sched-row.active-now { border-color:var(--blue); }
+.sched-row.disabled   { opacity:.5; }
+.sched-days-badges    { display:flex; gap:0.2rem; }
+.sched-day-badge {
+  padding:0.15rem 0.3rem;
+  border-radius:3px; font-size:0.68rem; font-weight:700;
+  font-family:monospace; line-height:1;
+  background:var(--border); color:var(--dim);
+}
+.sched-day-badge.on { background:var(--blue-d); color:var(--blue); }
+.sched-meta {
+  flex:1; display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;
+}
+.sched-time-label {
+  font-size:0.82rem; font-family:monospace; color:var(--text);
+}
+.sched-preset-label {
+  font-size:0.72rem; font-weight:600; padding:0.15rem 0.45rem;
+  border-radius:4px; background:var(--blue-d); color:var(--blue);
+  white-space:nowrap;
+}
+.sched-active-dot {
+  font-size:0.68rem; font-weight:700; letter-spacing:0.06em;
+  text-transform:uppercase; color:var(--green);
+  display:flex; align-items:center; gap:4px;
+}
+.sched-active-dot::before {
+  content:''; width:6px; height:6px; border-radius:50%;
+  background:var(--green); animation:pulse 2s ease-in-out infinite;
+}
+.sched-actions { display:flex; gap:0.3rem; margin-left:auto; flex-shrink:0; }
+.sched-empty {
+  font-size:0.8rem; color:var(--muted); padding:0.5rem 0;
+}
+
 .divider { border:none; border-top:1px solid var(--border); margin:0.25rem 0; }
 footer {
   margin-top:2rem; font-size:0.68rem; color:var(--dim); text-align:center;
@@ -722,6 +907,42 @@ footer {
   <div class="st-error" id="st-error"></div>
 </div>
 
+<!-- Scheduler -->
+<div class="card">
+  <div class="card-title">Scheduler</div>
+  <p style="font-size:0.8rem;color:var(--muted);margin-bottom:0.75rem">
+    Automatically apply a preset on a schedule. When a window ends with no
+    follow-on schedule, bandwidth reverts to unrestricted.
+  </p>
+  <div id="sched-list"><span class="sched-empty">Loading…</span></div>
+
+  <hr class="divider" style="margin:0.75rem 0">
+  <div class="section-label">Add Schedule</div>
+
+  <div class="sched-day-picker" id="sched-day-picker">
+    <button type="button" class="sched-day-chip" data-day="0">Mo</button>
+    <button type="button" class="sched-day-chip" data-day="1">Tu</button>
+    <button type="button" class="sched-day-chip" data-day="2">We</button>
+    <button type="button" class="sched-day-chip" data-day="3">Th</button>
+    <button type="button" class="sched-day-chip" data-day="4">Fr</button>
+    <button type="button" class="sched-day-chip" data-day="5">Sa</button>
+    <button type="button" class="sched-day-chip" data-day="6">Su</button>
+    <button type="button" class="sched-day-chip" id="sched-wkday-btn" data-group="weekdays" style="border-style:dashed">M–F</button>
+    <button type="button" class="sched-day-chip" id="sched-wkend-btn" data-group="weekend" style="border-style:dashed">Sa–Su</button>
+  </div>
+
+  <div class="sched-time-row">
+    <input type="time" id="sched-start" class="sched-time-input" value="09:00">
+    <span style="color:var(--muted);font-size:0.9rem">–</span>
+    <input type="time" id="sched-end" class="sched-time-input" value="17:00">
+    <select id="sched-preset" class="sched-preset-select">
+      <!-- populated by JS from PRESETS -->
+    </select>
+    <button class="add-btn" onclick="addSchedule()">+ Add</button>
+  </div>
+  <div id="sched-add-err" style="font-size:0.78rem;color:var(--red);margin-top:0.2rem;display:none"></div>
+</div>
+
 <footer>cruise-control &nbsp;·&nbsp; {{ hostname }} &nbsp;·&nbsp; github.com/mcglothi/cruise-control</footer>
 
 <script>
@@ -802,6 +1023,118 @@ async function startSpeedTest() {
   await fetch('/api/speedtest/start', { method: 'POST', body });
   stPoll = setInterval(pollSpeedtest, 500);
 }
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+const PRESETS = {{ presets_json | safe }};
+const DAY_NAMES = ['Mo','Tu','We','Th','Fr','Sa','Su'];
+
+(function initSchedulerForm() {
+  // Populate preset select
+  const sel = document.getElementById('sched-preset');
+  Object.entries(PRESETS).forEach(([k, label]) => {
+    const opt = document.createElement('option');
+    opt.value = k; opt.textContent = label;
+    sel.appendChild(opt);
+  });
+
+  // Day chip toggles
+  document.querySelectorAll('#sched-day-picker .sched-day-chip[data-day]').forEach(chip => {
+    chip.addEventListener('click', () => chip.classList.toggle('on'));
+  });
+  document.getElementById('sched-wkday-btn').addEventListener('click', () => {
+    document.querySelectorAll('#sched-day-picker [data-day]').forEach(c => {
+      c.classList.toggle('on', [0,1,2,3,4].includes(+c.dataset.day));
+    });
+  });
+  document.getElementById('sched-wkend-btn').addEventListener('click', () => {
+    document.querySelectorAll('#sched-day-picker [data-day]').forEach(c => {
+      c.classList.toggle('on', [5,6].includes(+c.dataset.day));
+    });
+  });
+})();
+
+function schedErr(msg) {
+  const el = document.getElementById('sched-add-err');
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+async function addSchedule() {
+  const days = Array.from(document.querySelectorAll('#sched-day-picker [data-day].on'))
+                    .map(c => +c.dataset.day);
+  const start  = document.getElementById('sched-start').value;
+  const end    = document.getElementById('sched-end').value;
+  const preset = document.getElementById('sched-preset').value;
+
+  if (!days.length)   { schedErr('Select at least one day.'); return; }
+  if (!start || !end) { schedErr('Enter start and end times.'); return; }
+  if (start >= end)   { schedErr('Start must be before end.'); return; }
+  if (!preset)        { schedErr('Select a preset.'); return; }
+  schedErr('');
+
+  const r = await fetch('/api/schedules/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ days, start, end, preset }),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    // Reset day chips
+    document.querySelectorAll('#sched-day-picker [data-day]').forEach(c => c.classList.remove('on'));
+    loadSchedules();
+  } else {
+    schedErr(d.msg || 'Failed to add schedule.');
+  }
+}
+
+async function deleteSchedule(id) {
+  await fetch('/api/schedules/' + id + '/delete', { method: 'POST' });
+  loadSchedules();
+}
+
+async function toggleSchedule(id) {
+  await fetch('/api/schedules/' + id + '/toggle', { method: 'POST' });
+  loadSchedules();
+}
+
+function renderScheduleRow(s, activeId) {
+  const isActive = s.id === activeId;
+  const dayBadges = DAY_NAMES.map((n, i) =>
+    `<span class="sched-day-badge${s.days.includes(i) ? ' on' : ''}">${n}</span>`
+  ).join('');
+  const presetLabel = PRESETS[s.preset] || s.preset;
+  const activeTag = isActive ? '<span class="sched-active-dot">active now</span>' : '';
+  const enabledLabel = s.enabled ? 'Pause' : 'Resume';
+  return `
+    <div class="sched-row${isActive ? ' active-now' : ''}${!s.enabled ? ' disabled' : ''}">
+      <div class="sched-days-badges">${dayBadges}</div>
+      <div class="sched-meta">
+        <span class="sched-time-label">${s.start} – ${s.end}</span>
+        <span class="sched-preset-label">${presetLabel}</span>
+        ${activeTag}
+      </div>
+      <div class="sched-actions">
+        <button class="icon-btn" onclick="toggleSchedule('${s.id}')">${enabledLabel}</button>
+        <button class="icon-btn del" onclick="deleteSchedule('${s.id}')">&#10005;</button>
+      </div>
+    </div>`;
+}
+
+async function loadSchedules() {
+  try {
+    const r = await fetch('/api/schedules');
+    const d = await r.json();
+    const list = document.getElementById('sched-list');
+    if (!d.schedules.length) {
+      list.innerHTML = '<p class="sched-empty">No schedules configured.</p>';
+    } else {
+      list.innerHTML = d.schedules.map(s => renderScheduleRow(s, d.active_id)).join('');
+    }
+  } catch(e) {}
+}
+
+loadSchedules();
+setInterval(loadSchedules, 10000);
 
 // ── Rate chip controls ────────────────────────────────────────────────────────
 function parseRate(s) {
@@ -1038,7 +1371,7 @@ def render_page(flash="", flash_type="ok"):
             key=k, label=v["label"], rate=v["rate"],
             active_cls=" is-active" if active == k else "",
         )
-        for k, v in cfg.items() if not v.get("builtin")
+        for k, v in cfg.items() if isinstance(v, dict) and not v.get("builtin") and "rate" in v
     ]
 
     custom_section = ""
@@ -1054,6 +1387,12 @@ def render_page(flash="", flash_type="ok"):
         for s in SPEEDTEST_SERVER_CATALOG
     ) + '<option value="__custom__">Custom URL</option>'
 
+    presets_json = json.dumps({
+        k: v["label"]
+        for k, v in cfg.items()
+        if isinstance(v, dict) and "rate" in v
+    })
+
     return render_template_string(PAGE,
         iface=IFACE, hostname=HOSTNAME,
         flash_html=flash_html,
@@ -1061,6 +1400,7 @@ def render_page(flash="", flash_type="ok"):
         clear_active=" is-active" if active == "clear" else "",
         custom_section=custom_section,
         endpoint_opts=endpoint_opts,
+        presets_json=presets_json,
     )
 
 
